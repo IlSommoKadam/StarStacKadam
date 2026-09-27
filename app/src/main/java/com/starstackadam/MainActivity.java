@@ -125,13 +125,19 @@ public final class MainActivity extends Activity {
             store.setHdSource(true);
             applySourceUi(true);
             connected = false;
+            selected.clear();
+            listBox.removeAllViews();
             setStatus("Sorgente HD — riconnetti", false);
+            updateStartEnabled();
         });
         sourceVespBtn.setOnClickListener(v -> {
             store.setHdSource(false);
             applySourceUi(false);
             connected = false;
+            selected.clear();
+            listBox.removeAllViews();
             setStatus("Sorgente Vespera — riconnetti", false);
+            updateStartEnabled();
         });
         sourceRow.addView(sourceHdBtn, rowBtnLp(0));
         sourceRow.addView(space(dp(8)));

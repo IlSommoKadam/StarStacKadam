@@ -35,6 +35,13 @@ public final class FrameCache {
         return file != null && file.isFile() && file.length() > 0;
     }
 
+    /** Elimina un file di cache corrotto / non decodificabile. */
+    public void invalidate(File file) {
+        if (file == null) return;
+        //noinspection ResultOfMethodCallIgnored
+        file.delete();
+    }
+
     private static String baseName(String path) {
         if (path == null || path.isEmpty()) return "frame.bin";
         int slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));

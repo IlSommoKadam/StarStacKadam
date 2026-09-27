@@ -12,6 +12,14 @@ public final class FrameDecoder {
     private FrameDecoder() {}
 
     public static ImagePlane decode(File file) throws IOException {
+        return decode(file, 0);
+    }
+
+    /**
+     * @param maxEdge se &gt; 0, usa {@code inSampleSize} così il Bitmap non supera circa maxEdge
+     *                sul lato lungo (picco RAM ≈ canvas MEAN, non risoluzione nativa).
+     */
+    public static ImagePlane decode(File file, int maxEdge) throws IOException {
         if (file == null || !file.isFile()) {
             throw new IOException("File assente");
         }
@@ -28,7 +36,7 @@ public final class FrameDecoder {
 
         BitmapFactory.Options opts = new BitmapFactory.Options();
         opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
-        opts.inSampleSize = 1;
+        opts.inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxEdge);
         Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), opts);
         if (bitmap == null) {
             throw new IOException("Decode fallito: " + name);
@@ -38,6 +46,14 @@ public final class FrameDecoder {
         } finally {
             bitmap.recycle();
         }
+    }
+
+    static int sampleSizeFor(int width, int height, int maxEdge) {
+        if (maxEdge <= 0) return 1;
+        int edge = Math.max(width, height);
+        int sample = 1;
+        while (edge / (sample * 2) >= maxEdge) sample *= 2;
+        return Math.max(1, sample);
     }
 
     public static ImagePlane fromBitmap(Bitmap bitmap) {

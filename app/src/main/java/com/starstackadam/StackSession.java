@@ -143,7 +143,13 @@ public final class StackSession {
                     return;
                 }
 
-                ImagePlane plane = FrameDecoder.decode(local);
+                ImagePlane plane;
+                try {
+                    plane = FrameDecoder.decode(local, MAX_EDGE);
+                } catch (Exception decodeFail) {
+                    cache.invalidate(local);
+                    throw decodeFail;
+                }
                 if (i == 0) {
                     plane = plane.fitEdge(MAX_EDGE);
                     width = plane.width;
