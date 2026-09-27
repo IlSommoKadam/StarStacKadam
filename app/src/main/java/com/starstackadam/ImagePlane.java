@@ -1,4 +1,4 @@
-package com.stackadam;
+package com.starstackadam;
 
 import java.util.Arrays;
 

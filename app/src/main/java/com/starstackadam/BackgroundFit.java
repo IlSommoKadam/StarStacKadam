@@ -1,4 +1,4 @@
-package com.stackadam;
+package com.starstackadam;
 
 /**
  * Sottrae un fondo lento stimato a polinomio di secondo grado.

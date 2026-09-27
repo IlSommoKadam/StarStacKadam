@@ -1,4 +1,4 @@
-package com.stackadam;
+package com.starstackadam;
 
 /**
  * Porta il frame lineare sullo schermo.
