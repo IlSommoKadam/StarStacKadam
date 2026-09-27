@@ -52,7 +52,7 @@ public final class FrameDecoder {
         if (maxEdge <= 0) return 1;
         int edge = Math.max(width, height);
         int sample = 1;
-        while (edge / (sample * 2) >= maxEdge) sample *= 2;
+        while (edge / sample > maxEdge) sample *= 2;
         return Math.max(1, sample);
     }
 
