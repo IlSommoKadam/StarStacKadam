@@ -23,3 +23,21 @@ android {
 dependencies {
     implementation 'commons-net:commons-net:3.11.1'
 }
+
+// Pubblica l'APK debug su C:\WORK\ESA\Share di default dopo assembleDebug
+def apkShareDir = file('C:/WORK/ESA/Share')
+
+tasks.register('publishDebugApkToShare', Copy) {
+    from(layout.buildDirectory.file('outputs/apk/debug/app-debug.apk'))
+    into(apkShareDir)
+    rename { 'StarStacKadam-debug.apk' }
+    doFirst {
+        apkShareDir.mkdirs()
+    }
+}
+
+afterEvaluate {
+    tasks.named('assembleDebug').configure {
+        finalizedBy 'publishDebugApkToShare'
+    }
+}

@@ -24,7 +24,14 @@ Package: `com.starstackadam` · versione 0.1
 | HD Helper | **2121** | Foto già sul disco del Pi / sync |
 | Vespera   | **2122** | Storage telescopio (sempre multi-select batch) |
 
-Host: indirizzo **Tailscale** del Pi (`100.x.y.z`) oppure hostname/LAN raggiungibile dal telefono.
+Default endpoint (modificabili in app):
+
+| Sorgente | Default |
+|----------|---------|
+| HD | `raspe:2121` |
+| Vespera | `raspe:2122` |
+
+`raspe` è l’hostname MagicDNS Tailscale del Pi (o sostituiscilo con l’IP `100.x.y.z` / LAN). Il campo accetta `host`, `host:porta` o `ftp://host:porta`.
 
 PASV: se il server annuncia `0.0.0.0` o un IP privato non raggiungibile dal client, l’app usa l’host di controllo.
 
@@ -42,9 +49,10 @@ cd C:\Danger\MieiProgetti\StarStacKadam
 .\gradlew.bat :app:assembleDebug
 ```
 
-APK debug:
+APK debug (anche copiato di default in Share):
 
-`app\build\outputs\apk\debug\app-debug.apk`
+- `app\build\outputs\apk\debug\app-debug.apk`
+- `C:\WORK\ESA\Share\StarStacKadam-debug.apk`
 
 ## Come usare lo stack
 

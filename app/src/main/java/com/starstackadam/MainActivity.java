@@ -73,7 +73,7 @@ public final class MainActivity extends Activity {
         executor = Executors.newSingleThreadExecutor();
         store = new HostSettingsStore(this);
         setContentView(buildUi());
-        hostInput.setText(store.getHost());
+        hostInput.setText(store.getEndpoint());
         applySourceUi(store.isHdSource());
         currentDir = store.getLastDir();
         pathView.setText(currentDir);
@@ -102,9 +102,12 @@ public final class MainActivity extends Activity {
         sub.setPadding(0, dp(4), 0, dp(12));
         root.addView(sub);
 
-        root.addView(label("Host Tailscale / LAN", 12, false));
+        root.addView(label("Endpoint Raspberry (ip:porta)", 12, false));
         hostInput = new EditText(this);
-        hostInput.setHint("es. 100.x.y.z oppure hostname");
+        hostInput.setHint("default HD "
+                + HostSettingsStore.DEFAULT_HD_ENDPOINT
+                + " · Vespera "
+                + HostSettingsStore.DEFAULT_VESPERA_ENDPOINT);
         hostInput.setTextColor(TEXT);
         hostInput.setHintTextColor(MUTED);
         hostInput.setBackground(rounded(CARD, dp(8)));
@@ -119,26 +122,10 @@ public final class MainActivity extends Activity {
 
         LinearLayout sourceRow = new LinearLayout(this);
         sourceRow.setOrientation(LinearLayout.HORIZONTAL);
-        sourceHdBtn = pillButton("HD :2121", true);
-        sourceVespBtn = pillButton("Vespera :2122", false);
-        sourceHdBtn.setOnClickListener(v -> {
-            store.setHdSource(true);
-            applySourceUi(true);
-            connected = false;
-            selected.clear();
-            listBox.removeAllViews();
-            setStatus("Sorgente HD — riconnetti", false);
-            updateStartEnabled();
-        });
-        sourceVespBtn.setOnClickListener(v -> {
-            store.setHdSource(false);
-            applySourceUi(false);
-            connected = false;
-            selected.clear();
-            listBox.removeAllViews();
-            setStatus("Sorgente Vespera — riconnetti", false);
-            updateStartEnabled();
-        });
+        sourceHdBtn = pillButton("HD :" + HostSettingsStore.PORT_HD, true);
+        sourceVespBtn = pillButton("Vespera :" + HostSettingsStore.PORT_VESPERA, false);
+        sourceHdBtn.setOnClickListener(v -> switchSource(true));
+        sourceVespBtn.setOnClickListener(v -> switchSource(false));
         sourceRow.addView(sourceHdBtn, rowBtnLp(0));
         sourceRow.addView(space(dp(8)));
         sourceRow.addView(sourceVespBtn, rowBtnLp(0));
@@ -193,23 +180,51 @@ public final class MainActivity extends Activity {
         return root;
     }
 
+    private void switchSource(boolean hd) {
+        persistEndpointFromInput();
+        store.setHdSource(hd);
+        hostInput.setText(store.getEndpoint());
+        applySourceUi(hd);
+        connected = false;
+        selected.clear();
+        listBox.removeAllViews();
+        setStatus(hd
+                ? "Sorgente HD " + store.getHdEndpoint() + " — riconnetti"
+                : "Sorgente Vespera " + store.getVesperaEndpoint() + " — riconnetti", false);
+        updateStartEnabled();
+    }
+
+    private void persistEndpointFromInput() {
+        String raw = hostInput.getText() == null ? "" : hostInput.getText().toString().trim();
+        if (raw.isEmpty()) return;
+        store.setEndpoint(raw);
+    }
+
     private void applySourceUi(boolean hd) {
         stylePill(sourceHdBtn, hd);
         stylePill(sourceVespBtn, !hd);
-        int port = hd ? HostSettingsStore.PORT_HD : HostSettingsStore.PORT_VESPERA;
+        String endpoint = hd ? store.getHdEndpoint() : store.getVesperaEndpoint();
         sourceLabel.setText(hd
-                ? "FTP Helper HD — porta " + port + " (multi-select batch)"
-                : "FTP telescopio — porta " + port + " (multi-select batch, no live poll)");
+                ? "FTP Helper HD — " + endpoint + " (batch)"
+                : "FTP telescopio — " + endpoint + " (batch, no live poll)");
     }
 
     private void connect() {
-        String host = hostInput.getText() == null ? "" : hostInput.getText().toString().trim();
-        if (host.isEmpty()) {
-            setStatus("Host obbligatorio", true);
+        String raw = hostInput.getText() == null ? "" : hostInput.getText().toString().trim();
+        if (raw.isEmpty()) {
+            raw = store.getEndpoint();
+            hostInput.setText(raw);
+        }
+        HostSettingsStore.Endpoint endpoint = HostSettingsStore.Endpoint.parse(
+                raw, store.isHdSource() ? HostSettingsStore.PORT_HD : HostSettingsStore.PORT_VESPERA);
+        if (endpoint.host.isEmpty()) {
+            setStatus("Host obbligatorio (es. " + HostSettingsStore.DEFAULT_HD_ENDPOINT + ")", true);
             return;
         }
-        store.setHost(host);
-        int port = store.getPort();
+        store.setEndpoint(endpoint.toString());
+        hostInput.setText(endpoint.toString());
+        String host = endpoint.host;
+        int port = endpoint.port;
         connectBtn.setEnabled(false);
         setStatus("Connessione a " + host + ":" + port + "…", false);
         executor.execute(() -> {
