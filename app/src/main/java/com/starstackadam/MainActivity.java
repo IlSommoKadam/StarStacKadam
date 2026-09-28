@@ -8,14 +8,16 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.InputType;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
-import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -24,139 +26,236 @@ import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Host Tailscale/LAN, sorgente HD/Vespera, browse FTP multi-select, avvio stack.
- * UI scura programmatica — non clone Singularity.
+ * Home: tab Oggetti (scan delle cartelle) e tab File FTP (scroll delle directory).
  */
 public final class MainActivity extends Activity {
     public static final String EXTRA_HOST = "host";
     public static final String EXTRA_PORT = "port";
     public static final String EXTRA_REMOTE_PATHS = "remote_paths";
     public static final String EXTRA_LOCAL_FILES = "local_files";
+    public static final String EXTRA_MODE = "stack_mode";
+    public static final String EXTRA_SCIENTIFIC = "scientific_name";
+    public static final String EXTRA_PUBLIC = "public_name";
+    public static final String EXTRA_KIND = "object_kind";
 
-    private static final int BG = 0xFF121416;
-    private static final int CARD = 0xFF1C1F24;
+    private static final int CARD = 0xA61C222C;
     private static final int TEXT = 0xFFE8EAED;
     private static final int MUTED = 0xFF9AA0A6;
     private static final int ACCENT = 0xFF8AB4F8;
+    private static final int SHARE = 0xFF81C995;
+    private static final int ONLINE = 0xFF3DDC84;
+    private static final int CHECKING = 0xFFFDD663;
     private static final int DANGER = 0xFFF28B82;
+    private static final int SELECTED = 0xFF243044;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private ExecutorService executor;
+    private ExecutorService probes;
     private HostSettingsStore store;
 
-    private EditText hostInput;
     private TextView statusView;
     private TextView pathView;
-    private TextView sourceLabel;
     private LinearLayout listBox;
+    private LinearLayout ftpListBox;
+    private View objectPane;
+    private View ftpPane;
     private Button connectBtn;
     private Button upBtn;
-    private Button startBtn;
-    private Button sourceHdBtn;
-    private Button sourceVespBtn;
+    private Button liveBtn;
+    private Button shareBtn;
+    private SourceChip hdChip;
+    private SourceChip veChip;
+    private Button tabObjectsBtn;
+    private Button tabFtpBtn;
+    private final List<Button> filterButtons = new ArrayList<>();
 
-    private final List<FtpBrowser.Entry> entries = new ArrayList<>();
-    private final Set<String> selected = new LinkedHashSet<>();
-    private String currentDir = "/";
+    private final List<SkyObject> objects = new ArrayList<>();
+    private final List<FtpBrowser.Entry> ftpEntries = new ArrayList<>();
+    private final Set<String> pickedPaths = new LinkedHashSet<>();
+    private SkyObject selected;
+    private SkyObject.Kind kindFilter;
+    private boolean objectsTab = true;
     private boolean connected;
+    private String currentDir = "/";
     private String sessionHost = "";
     private int sessionPort = HostSettingsStore.PORT_HD;
+    private String boundEndpoint = "";
+    private int connectGen;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         executor = Executors.newSingleThreadExecutor();
+        probes = Executors.newFixedThreadPool(2);
         store = new HostSettingsStore(this);
-        setContentView(buildUi());
-        hostInput.setText(store.getEndpoint());
+        setContentView(AppBackdrop.wrap(this, buildUi()));
         applySourceUi(store.isHdSource());
         currentDir = store.getLastDir();
         pathView.setText(currentDir);
+        showTab(true);
         updateStartEnabled();
+        boundEndpoint = store.getEndpoint();
+        connect();
+        probeEndpoints();
+        main.post(() -> AppUpdates.check(this, true, null));
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (store == null) return;
+        probeEndpoints();
+        String now = store.getEndpoint();
+        if (!now.equals(boundEndpoint)) {
+            boundEndpoint = now;
+            connected = false;
+            connect();
+        }
     }
 
     @Override
     protected void onDestroy() {
         if (executor != null) executor.shutdownNow();
+        if (probes != null) probes.shutdownNow();
         super.onDestroy();
     }
 
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(BG);
         int pad = dp(16);
-        root.setPadding(pad, pad, pad, pad);
+        root.setPadding(pad, dp(8), pad, pad);
 
-        TextView title = label("StarStacKadam", 22, true);
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        int markSize = dp(36);
+        ImageView mark = AppBackdrop.mark(this, markSize);
+        LinearLayout.LayoutParams markLp = new LinearLayout.LayoutParams(markSize, markSize);
+        markLp.rightMargin = dp(8);
+        titleRow.addView(mark, markLp);
+        TextView title = label("StarStacKadam", 20, true);
         title.setTextColor(ACCENT);
-        root.addView(title);
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        titleRow.addView(title, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Button settingsBtn = pillButton("Impostazioni", false);
+        settingsBtn.setOnClickListener(v ->
+                startActivity(new Intent(this, SettingsActivity.class)));
+        titleRow.addView(settingsBtn);
+        root.addView(titleRow);
 
-        TextView sub = label("Stack preview (JPEG) — MEAN streaming via FTP batch", 13, false);
+        TextView sub = label("Oggetti dalle cartelle, oppure File FTP per le directory.", 13, false);
         sub.setTextColor(MUTED);
-        sub.setPadding(0, dp(4), 0, dp(12));
+        sub.setSingleLine(true);
+        sub.setEllipsize(TextUtils.TruncateAt.END);
+        sub.setPadding(0, dp(4), 0, dp(8));
         root.addView(sub);
-
-        root.addView(label("Endpoint Raspberry (ip:porta)", 12, false));
-        hostInput = new EditText(this);
-        hostInput.setHint("default HD "
-                + HostSettingsStore.DEFAULT_HD_ENDPOINT
-                + " · Vespera "
-                + HostSettingsStore.DEFAULT_VESPERA_ENDPOINT);
-        hostInput.setTextColor(TEXT);
-        hostInput.setHintTextColor(MUTED);
-        hostInput.setBackground(rounded(CARD, dp(8)));
-        hostInput.setPadding(dp(12), dp(10), dp(12), dp(10));
-        hostInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        hostInput.setSingleLine(true);
-        LinearLayout.LayoutParams hostLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        hostLp.topMargin = dp(4);
-        hostLp.bottomMargin = dp(10);
-        root.addView(hostInput, hostLp);
 
         LinearLayout sourceRow = new LinearLayout(this);
         sourceRow.setOrientation(LinearLayout.HORIZONTAL);
-        sourceHdBtn = pillButton("HD :" + HostSettingsStore.PORT_HD, true);
-        sourceVespBtn = pillButton("Vespera :" + HostSettingsStore.PORT_VESPERA, false);
-        sourceHdBtn.setOnClickListener(v -> switchSource(true));
-        sourceVespBtn.setOnClickListener(v -> switchSource(false));
-        sourceRow.addView(sourceHdBtn, rowBtnLp(0));
+        hdChip = new SourceChip("HD");
+        veChip = new SourceChip("Vespera");
+        hdChip.box.setOnClickListener(v -> switchSource(true));
+        veChip.box.setOnClickListener(v -> switchSource(false));
+        sourceRow.addView(hdChip.box, rowBtnLp(1));
         sourceRow.addView(space(dp(8)));
-        sourceRow.addView(sourceVespBtn, rowBtnLp(0));
-        root.addView(sourceRow);
+        sourceRow.addView(veChip.box, rowBtnLp(1));
+        LinearLayout.LayoutParams sourceLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sourceLp.bottomMargin = dp(8);
+        root.addView(sourceRow, sourceLp);
 
-        sourceLabel = label("", 12, false);
-        sourceLabel.setTextColor(MUTED);
-        sourceLabel.setPadding(0, dp(6), 0, dp(8));
-        root.addView(sourceLabel);
+        LinearLayout tabRow = new LinearLayout(this);
+        tabRow.setOrientation(LinearLayout.HORIZONTAL);
+        tabObjectsBtn = pillButton("Oggetti", true);
+        tabFtpBtn = pillButton("File FTP", false);
+        tabObjectsBtn.setOnClickListener(v -> showTab(true));
+        tabFtpBtn.setOnClickListener(v -> showTab(false));
+        tabRow.addView(tabObjectsBtn, rowBtnLp(1));
+        tabRow.addView(space(dp(8)));
+        tabRow.addView(tabFtpBtn, rowBtnLp(1));
+        LinearLayout.LayoutParams tabLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tabLp.bottomMargin = dp(8);
+        root.addView(tabRow, tabLp);
 
-        LinearLayout actionRow = new LinearLayout(this);
-        actionRow.setOrientation(LinearLayout.HORIZONTAL);
-        connectBtn = actionButton("Connetti", ACCENT);
+        connectBtn = actionButton("Aggiorna elenco", ACCENT);
         connectBtn.setOnClickListener(v -> connect());
-        upBtn = actionButton("Cartella su", MUTED);
-        upBtn.setOnClickListener(v -> goUp());
-        upBtn.setEnabled(false);
-        actionRow.addView(connectBtn, rowBtnLp(1));
-        actionRow.addView(space(dp(8)));
-        actionRow.addView(upBtn, rowBtnLp(1));
-        root.addView(actionRow);
+        root.addView(connectBtn);
 
-        statusView = label("Inserisci host e premi Connetti.", 13, false);
+        statusView = label("Connessione…", 13, false);
         statusView.setTextColor(MUTED);
-        statusView.setPadding(0, dp(10), 0, dp(4));
+        statusView.setSingleLine(true);
+        statusView.setEllipsize(TextUtils.TruncateAt.END);
+        statusView.setPadding(0, dp(8), 0, dp(6));
         root.addView(statusView);
 
-        pathView = label("/", 12, false);
-        pathView.setTextColor(ACCENT);
-        pathView.setPadding(0, 0, 0, dp(8));
-        root.addView(pathView);
+        FrameLayout pages = new FrameLayout(this);
+        objectPane = buildObjectPane();
+        ftpPane = buildFtpPane();
+        pages.addView(objectPane, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        pages.addView(ftpPane, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        root.addView(pages, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        liveBtn = actionButton("Visione live", ACCENT);
+        liveBtn.setOnClickListener(v -> startStack(StackSession.Mode.LIVE));
+        shareBtn = actionButton("Stack condivisibile", SHARE);
+        shareBtn.setOnClickListener(v -> startStack(StackSession.Mode.SHARE));
+        LinearLayout.LayoutParams liveLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        liveLp.topMargin = dp(12);
+        LinearLayout.LayoutParams shareLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        shareLp.topMargin = dp(8);
+        root.addView(liveBtn, liveLp);
+        root.addView(shareBtn, shareLp);
+
+        TextView version = label(AppVersion.label(this), 15, true);
+        version.setTextColor(TEXT);
+        version.setShadowLayer(dp(3), 0, dp(1), 0xE0000000);
+        version.setGravity(Gravity.END);
+        version.setSingleLine(true);
+        LinearLayout.LayoutParams versionLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        versionLp.topMargin = dp(8);
+        root.addView(version, versionLp);
+        return root;
+    }
+
+    private View buildObjectPane() {
+        LinearLayout pane = new LinearLayout(this);
+        pane.setOrientation(LinearLayout.VERTICAL);
+
+        HorizontalScrollView filters = new HorizontalScrollView(this);
+        filters.setHorizontalScrollBarEnabled(false);
+        LinearLayout filterRow = new LinearLayout(this);
+        filterRow.setOrientation(LinearLayout.HORIZONTAL);
+        filterRow.addView(filterButton("Tutti", null));
+        filterRow.addView(space(dp(6)));
+        filterRow.addView(filterButton("Galassie", SkyObject.Kind.GALAXY));
+        filterRow.addView(space(dp(6)));
+        filterRow.addView(filterButton("Stelle", SkyObject.Kind.STAR));
+        filterRow.addView(space(dp(6)));
+        filterRow.addView(filterButton("Nebulose", SkyObject.Kind.NEBULA));
+        filterRow.addView(space(dp(6)));
+        filterRow.addView(filterButton("Altri", SkyObject.Kind.OTHER));
+        filters.addView(filterRow);
+        LinearLayout.LayoutParams filterLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        filterLp.bottomMargin = dp(8);
+        pane.addView(filters, filterLp);
+        styleFilters();
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -166,103 +265,175 @@ public final class MainActivity extends Activity {
         listBox.setPadding(dp(4), dp(4), dp(4), dp(4));
         scroll.addView(listBox, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams scrollLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
-        root.addView(scroll, scrollLp);
-
-        startBtn = actionButton("Avvia stack", ACCENT);
-        startBtn.setOnClickListener(v -> startStack());
-        LinearLayout.LayoutParams startLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        startLp.topMargin = dp(12);
-        root.addView(startBtn, startLp);
-
-        return root;
+        pane.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        return pane;
     }
 
-    private void switchSource(boolean hd) {
-        persistEndpointFromInput();
-        store.setHdSource(hd);
-        hostInput.setText(store.getEndpoint());
-        applySourceUi(hd);
-        connected = false;
-        selected.clear();
-        listBox.removeAllViews();
-        setStatus(hd
-                ? "Sorgente HD " + store.getHdEndpoint() + " — riconnetti"
-                : "Sorgente Vespera " + store.getVesperaEndpoint() + " — riconnetti", false);
+    private View buildFtpPane() {
+        LinearLayout pane = new LinearLayout(this);
+        pane.setOrientation(LinearLayout.VERTICAL);
+
+        pathView = label("/", 12, false);
+        pathView.setTextColor(ACCENT);
+        pathView.setPadding(0, 0, 0, dp(6));
+        pane.addView(pathView);
+
+        upBtn = actionButton("Cartella su", MUTED);
+        upBtn.setOnClickListener(v -> goUp());
+        upBtn.setEnabled(false);
+        LinearLayout.LayoutParams upLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        upLp.bottomMargin = dp(8);
+        pane.addView(upBtn, upLp);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        ftpListBox = new LinearLayout(this);
+        ftpListBox.setOrientation(LinearLayout.VERTICAL);
+        ftpListBox.setBackground(rounded(CARD, dp(10)));
+        ftpListBox.setPadding(dp(4), dp(4), dp(4), dp(4));
+        scroll.addView(ftpListBox, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        pane.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        return pane;
+    }
+
+    private void showTab(boolean objects) {
+        objectsTab = objects;
+        objectPane.setVisibility(objects ? View.VISIBLE : View.GONE);
+        ftpPane.setVisibility(objects ? View.GONE : View.VISIBLE);
+        stylePill(tabObjectsBtn, objects);
+        stylePill(tabFtpBtn, !objects);
+        connectBtn.setText(objects ? "Aggiorna elenco" : "Aggiorna cartella");
+        if (!objects && connected) {
+            upBtn.setEnabled(!"/".equals(currentDir));
+            if (ftpListBox.getChildCount() == 0) openDir(currentDir);
+        }
         updateStartEnabled();
     }
 
-    private void persistEndpointFromInput() {
-        String raw = hostInput.getText() == null ? "" : hostInput.getText().toString().trim();
-        if (raw.isEmpty()) return;
-        store.setEndpoint(raw);
+    private void switchSource(boolean hd) {
+        if (store.isHdSource() == hd && connected) return;
+        store.setHdSource(hd);
+        applySourceUi(hd);
+        connected = false;
+        objects.clear();
+        selected = null;
+        pickedPaths.clear();
+        ftpEntries.clear();
+        listBox.removeAllViews();
+        ftpListBox.removeAllViews();
+        upBtn.setEnabled(false);
+        boundEndpoint = store.getEndpoint();
+        updateStartEnabled();
+        connect();
     }
 
     private void applySourceUi(boolean hd) {
-        stylePill(sourceHdBtn, hd);
-        stylePill(sourceVespBtn, !hd);
-        String endpoint = hd ? store.getHdEndpoint() : store.getVesperaEndpoint();
-        sourceLabel.setText(hd
-                ? "FTP Helper HD — " + endpoint + " (batch)"
-                : "FTP telescopio — " + endpoint + " (batch, no live poll)");
+        hdChip.setSelected(hd);
+        veChip.setSelected(!hd);
+    }
+
+    private void probeEndpoints() {
+        HostSettingsStore.Endpoint hd = HostSettingsStore.Endpoint.parse(
+                store.getHdEndpoint(), HostSettingsStore.PORT_HD);
+        HostSettingsStore.Endpoint ve = HostSettingsStore.Endpoint.parse(
+                store.getVesperaEndpoint(), HostSettingsStore.PORT_VESPERA);
+        int timeout = store.getFtpTimeoutSec();
+        hdChip.setReachable(null);
+        veChip.setReachable(null);
+        probes.execute(() -> {
+            boolean ok = FtpBrowser.reachable(hd.host, hd.port, timeout);
+            main.post(() -> {
+                if (!isDestroyed()) hdChip.setReachable(ok);
+            });
+        });
+        probes.execute(() -> {
+            boolean ok = FtpBrowser.reachable(ve.host, ve.port, timeout);
+            main.post(() -> {
+                if (!isDestroyed()) veChip.setReachable(ok);
+            });
+        });
     }
 
     private void connect() {
-        String raw = hostInput.getText() == null ? "" : hostInput.getText().toString().trim();
-        if (raw.isEmpty()) {
-            raw = store.getEndpoint();
-            hostInput.setText(raw);
-        }
-        HostSettingsStore.Endpoint endpoint = HostSettingsStore.Endpoint.parse(
-                raw, store.isHdSource() ? HostSettingsStore.PORT_HD : HostSettingsStore.PORT_VESPERA);
-        if (endpoint.host.isEmpty()) {
-            setStatus("Host obbligatorio (es. " + HostSettingsStore.DEFAULT_HD_ENDPOINT + ")", true);
+        if (!objectsTab && connected) {
+            openDir(currentDir.isEmpty() ? "/" : currentDir);
             return;
         }
-        store.setEndpoint(endpoint.toString());
-        hostInput.setText(endpoint.toString());
+        boolean hd = store.isHdSource();
+        String sourceName = hd ? "HD" : "Vespera";
+        HostSettingsStore.Endpoint endpoint = HostSettingsStore.Endpoint.parse(
+                store.getEndpoint(), hd ? HostSettingsStore.PORT_HD : HostSettingsStore.PORT_VESPERA);
+        if (endpoint.host.isEmpty()) {
+            setStatus("Endpoint " + sourceName + " mancante. Aprilo in Impostazioni.", true);
+            return;
+        }
         String host = endpoint.host;
         int port = endpoint.port;
+        int timeout = store.getFtpTimeoutSec();
+        String startDir = store.getLastDir();
+        int gen = ++connectGen;
         connectBtn.setEnabled(false);
-        setStatus("Connessione a " + host + ":" + port + "…", false);
+        setStatus("Lettura oggetti " + sourceName + "…", false);
         executor.execute(() -> {
             try (FtpBrowser ftp = new FtpBrowser()) {
-                ftp.connect(host, port);
-                String start = store.getLastDir();
-                List<FtpBrowser.Entry> listed;
+                ftp.connect(host, port, timeout);
+                List<SkyObject> listed = ObjectCatalog.scan(ftp, getCacheDir());
+                String dir = startDir == null || startDir.isEmpty() ? "/" : startDir;
+                List<FtpBrowser.Entry> files;
                 try {
-                    listed = ftp.list(start);
-                } catch (Exception e) {
-                    start = "/";
-                    listed = ftp.list("/");
+                    files = ftp.list(dir);
+                    dir = ftp.pwd();
+                } catch (Exception ignored) {
+                    dir = "/";
+                    files = ftp.list("/");
+                    dir = ftp.pwd();
                 }
-                String dir = ftp.pwd();
-                List<FtpBrowser.Entry> finalListed = listed;
                 String finalDir = dir;
+                List<FtpBrowser.Entry> finalFiles = files;
                 main.post(() -> {
+                    if (gen != connectGen || isDestroyed()) return;
                     sessionHost = host;
                     sessionPort = port;
+                    boundEndpoint = host + ":" + port;
                     currentDir = finalDir;
                     store.setLastDir(finalDir);
                     connected = true;
-                    selected.clear();
-                    showEntries(finalListed);
-                    upBtn.setEnabled(!"/".equals(finalDir));
+                    objects.clear();
+                    objects.addAll(listed);
+                    selected = null;
+                    pickedPaths.clear();
                     connectBtn.setEnabled(true);
-                    setStatus("Connesso — seleziona JPEG/PNG e Avvia stack", false);
+                    showObjects();
+                    showFtpEntries(finalFiles);
+                    upBtn.setEnabled(!"/".equals(finalDir));
+                    if (listed.isEmpty()) {
+                        setStatus(finalFiles.isEmpty()
+                                ? "Connesso a " + sourceName + ". Cartella vuota."
+                                : "Connesso a " + sourceName + ". Nessuna posa JPEG/PNG.", false);
+                    } else {
+                        setStatus("Trovati " + listed.size()
+                                + " oggetti su " + sourceName + ". Scegline uno.", false);
+                    }
                     updateStartEnabled();
                 });
             } catch (Exception e) {
                 String msg = e.getMessage();
                 if (msg == null || msg.isEmpty()) msg = "Connessione fallita";
-                String err = msg;
+                String err = sourceName + ": " + msg;
                 main.post(() -> {
+                    if (gen != connectGen || isDestroyed()) return;
                     connected = false;
+                    objects.clear();
+                    selected = null;
+                    pickedPaths.clear();
                     connectBtn.setEnabled(true);
                     upBtn.setEnabled(false);
                     listBox.removeAllViews();
+                    ftpListBox.removeAllViews();
                     setStatus(err, true);
                     updateStartEnabled();
                 });
@@ -272,8 +443,7 @@ public final class MainActivity extends Activity {
 
     private void goUp() {
         if (!connected) return;
-        String parent = FtpBrowser.parentPath(currentDir);
-        openDir(parent);
+        openDir(FtpBrowser.parentPath(currentDir));
     }
 
     private void openDir(String path) {
@@ -285,14 +455,14 @@ public final class MainActivity extends Activity {
         int port = sessionPort;
         executor.execute(() -> {
             try (FtpBrowser ftp = new FtpBrowser()) {
-                ftp.connect(host, port);
+                ftp.connect(host, port, store.getFtpTimeoutSec());
                 List<FtpBrowser.Entry> listed = ftp.list(path);
                 String dir = ftp.pwd();
                 main.post(() -> {
                     currentDir = dir;
                     store.setLastDir(dir);
-                    selected.clear();
-                    showEntries(listed);
+                    pickedPaths.clear();
+                    showFtpEntries(listed);
                     upBtn.setEnabled(!"/".equals(dir));
                     connectBtn.setEnabled(true);
                     setStatus("Cartella: " + dir, false);
@@ -304,44 +474,43 @@ public final class MainActivity extends Activity {
                 String err = msg;
                 main.post(() -> {
                     connectBtn.setEnabled(true);
-                    upBtn.setEnabled(!"/".equals(currentDir));
+                    upBtn.setEnabled(connected && !"/".equals(currentDir));
                     setStatus(err, true);
                 });
             }
         });
     }
 
-    private void showEntries(List<FtpBrowser.Entry> listed) {
-        entries.clear();
-        entries.addAll(listed);
-        listBox.removeAllViews();
+    private void showFtpEntries(List<FtpBrowser.Entry> listed) {
+        ftpEntries.clear();
+        ftpEntries.addAll(listed);
+        ftpListBox.removeAllViews();
         pathView.setText(currentDir);
         if (listed.isEmpty()) {
             TextView empty = label("Cartella vuota", 14, false);
             empty.setTextColor(MUTED);
             empty.setPadding(dp(12), dp(16), dp(12), dp(16));
-            listBox.addView(empty);
+            ftpListBox.addView(empty);
             return;
         }
         for (FtpBrowser.Entry entry : listed) {
             if (entry.directory) {
-                listBox.addView(dirRow(entry));
+                ftpListBox.addView(dirRow(entry));
             } else if (FtpBrowser.isImageName(entry.name)) {
-                listBox.addView(fileRow(entry));
+                ftpListBox.addView(fileRow(entry));
             } else if (FtpBrowser.isFitsName(entry.name)) {
                 TextView fits = label(entry.name + " (FITS non supportato)", 13, false);
                 fits.setTextColor(MUTED);
                 fits.setPadding(dp(12), dp(8), dp(12), dp(8));
-                listBox.addView(fits);
+                ftpListBox.addView(fits);
             }
         }
     }
 
     private View dirRow(FtpBrowser.Entry entry) {
-        TextView row = label("📁  " + entry.name, 15, true);
+        TextView row = label("▸  " + entry.name, 15, true);
         row.setTextColor(ACCENT);
         row.setPadding(dp(12), dp(12), dp(12), dp(12));
-        row.setBackgroundColor(Color.TRANSPARENT);
         row.setOnClickListener(v -> openDir(entry.path));
         return row;
     }
@@ -351,40 +520,165 @@ public final class MainActivity extends Activity {
         box.setText(entry.name + "  (" + formatSize(entry.size) + ")");
         box.setTextColor(TEXT);
         box.setPadding(dp(8), dp(10), dp(8), dp(10));
-        box.setChecked(selected.contains(entry.path));
+        box.setChecked(pickedPaths.contains(entry.path));
         box.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            if (isChecked) selected.add(entry.path);
-            else selected.remove(entry.path);
+            if (isChecked) pickedPaths.add(entry.path);
+            else pickedPaths.remove(entry.path);
             updateStartEnabled();
         });
         return box;
     }
 
-    private void startStack() {
-        if (selected.isEmpty()) {
-            Toast.makeText(this, "Seleziona almeno un'immagine", Toast.LENGTH_SHORT).show();
+    private void showObjects() {
+        listBox.removeAllViews();
+        List<SkyObject> visible = new ArrayList<>();
+        for (SkyObject object : objects) {
+            if (kindFilter == null || object.kind == kindFilter) visible.add(object);
+        }
+        if (visible.isEmpty()) {
+            TextView empty = label(
+                    objects.isEmpty() ? "Nessun oggetto caricato" : "Nessun oggetto in questo filtro",
+                    14, false);
+            empty.setTextColor(MUTED);
+            empty.setPadding(dp(12), dp(16), dp(12), dp(16));
+            listBox.addView(empty);
             return;
         }
+        SkyObject.Kind header = null;
+        for (SkyObject object : visible) {
+            if (kindFilter == null && object.kind != header) {
+                header = object.kind;
+                TextView section = label(sectionTitle(header), 12, true);
+                section.setTextColor(ACCENT);
+                section.setPadding(dp(12), dp(10), dp(12), dp(4));
+                listBox.addView(section);
+            }
+            listBox.addView(objectRow(object));
+        }
+    }
+
+    private View objectRow(SkyObject object) {
+        boolean on = selected != null && selected.folderPath.equals(object.folderPath);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setBackground(rounded(on ? SELECTED : Color.TRANSPARENT, dp(8)));
+
+        String title = object.registeredName.isEmpty() ? object.scientificName : object.registeredName;
+        TextView name = label(title, 16, true);
+        name.setTextColor(TEXT);
+        row.addView(name);
+        if (!object.publicName.isEmpty() && !object.publicName.equalsIgnoreCase(title)) {
+            TextView common = label(object.publicName, 14, false);
+            common.setTextColor(on ? ACCENT : TEXT);
+            common.setPadding(0, dp(2), 0, 0);
+            row.addView(common);
+        }
+        TextView meta = label(metaLine(object), 12, false);
+        meta.setTextColor(on ? ACCENT : MUTED);
+        meta.setPadding(0, dp(2), 0, 0);
+        row.addView(meta);
+        row.setOnClickListener(v -> {
+            selected = object;
+            showObjects();
+            updateStartEnabled();
+            String dates = object.datesLabel();
+            StringBuilder status = new StringBuilder(object.registeredName);
+            if (!object.publicName.equalsIgnoreCase(object.registeredName)) {
+                status.append(" — ").append(object.publicName);
+            }
+            if (!dates.isEmpty()) status.append(" — ").append(dates);
+            status.append(" — ").append(object.frameCount()).append(" pose");
+            setStatus(status.toString(), false);
+        });
+        return row;
+    }
+
+    private static String metaLine(SkyObject object) {
+        String frames = object.frameCount() + (object.frameCount() == 1 ? " posa" : " pose");
+        String dates = object.datesLabel();
+        if (dates.isEmpty()) return object.kindLabel() + "  ·  " + frames;
+        return dates + "  ·  " + object.kindLabel() + "  ·  " + frames;
+    }
+
+    private static String sectionTitle(SkyObject.Kind kind) {
+        return switch (kind) {
+            case GALAXY -> "Galassie";
+            case STAR -> "Stelle";
+            case NEBULA -> "Nebulose";
+            case OTHER -> "Altri";
+        };
+    }
+
+    private void startStack(StackSession.Mode mode) {
         if (!connected || sessionHost.isEmpty()) {
             Toast.makeText(this, "Connettiti prima all'FTP", Toast.LENGTH_SHORT).show();
             return;
         }
-        ArrayList<String> paths = new ArrayList<>(selected);
+        ArrayList<String> paths = new ArrayList<>();
+        String scientific = "";
+        String pub = "";
+        String kind = "";
+        if (objectsTab) {
+            if (selected == null || selected.imagePaths.isEmpty()) {
+                Toast.makeText(this, "Scegli un oggetto con almeno una posa", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            paths.addAll(selected.imagePaths);
+            scientific = selected.scientificName;
+            pub = selected.publicName;
+            kind = selected.kindLabel();
+        } else {
+            if (pickedPaths.isEmpty()) {
+                Toast.makeText(this, "Seleziona almeno un'immagine", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            paths.addAll(pickedPaths);
+        }
         Intent intent = new Intent(this, StackWorkActivity.class);
         intent.putExtra(EXTRA_HOST, sessionHost);
         intent.putExtra(EXTRA_PORT, sessionPort);
         intent.putStringArrayListExtra(EXTRA_REMOTE_PATHS, paths);
+        intent.putExtra(EXTRA_MODE, mode.name());
+        intent.putExtra(EXTRA_SCIENTIFIC, scientific);
+        intent.putExtra(EXTRA_PUBLIC, pub);
+        intent.putExtra(EXTRA_KIND, kind);
         startActivity(intent);
     }
 
     private void updateStartEnabled() {
-        startBtn.setEnabled(connected && !selected.isEmpty());
-        startBtn.setAlpha(startBtn.isEnabled() ? 1f : 0.45f);
+        boolean ok = connected && (objectsTab
+                ? selected != null && selected.frameCount() > 0
+                : !pickedPaths.isEmpty());
+        liveBtn.setEnabled(ok);
+        shareBtn.setEnabled(ok);
+        liveBtn.setAlpha(ok ? 1f : 0.45f);
+        shareBtn.setAlpha(ok ? 1f : 0.45f);
     }
 
     private void setStatus(String text, boolean error) {
         statusView.setText(text);
         statusView.setTextColor(error ? DANGER : MUTED);
+    }
+
+    private Button filterButton(String text, SkyObject.Kind kind) {
+        Button b = pillButton(text, kind == null);
+        b.setOnClickListener(v -> {
+            kindFilter = kind;
+            styleFilters();
+            showObjects();
+        });
+        b.setTag(kind);
+        filterButtons.add(b);
+        return b;
+    }
+
+    private void styleFilters() {
+        for (Button button : filterButtons) {
+            Object tag = button.getTag();
+            boolean on = kindFilter == null ? tag == null : tag == kindFilter;
+            stylePill(button, on);
+        }
     }
 
     private TextView label(String text, float sp, boolean bold) {
@@ -399,20 +693,71 @@ public final class MainActivity extends Activity {
     private Button actionButton(String text, int color) {
         Button b = new Button(this);
         b.setText(text);
-        b.setAllCaps(false);
+        compact(b);
         b.setTextColor(Color.WHITE);
         b.setBackground(rounded(color, dp(8)));
-        b.setPadding(dp(12), dp(10), dp(12), dp(10));
         return b;
     }
 
     private Button pillButton(String text, boolean selected) {
         Button b = new Button(this);
         b.setText(text);
-        b.setAllCaps(false);
-        b.setPadding(dp(8), dp(8), dp(8), dp(8));
+        compact(b);
         stylePill(b, selected);
         return b;
+    }
+
+    private void compact(Button b) {
+        b.setAllCaps(false);
+        b.setSingleLine(true);
+        b.setEllipsize(TextUtils.TruncateAt.END);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(dp(36));
+        b.setMinimumHeight(dp(36));
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(10), dp(4), dp(10), dp(4));
+    }
+
+    private final class SourceChip {
+        final LinearLayout box;
+        final View dot;
+        final TextView text;
+
+        SourceChip(String label) {
+            box = new LinearLayout(MainActivity.this);
+            box.setOrientation(LinearLayout.HORIZONTAL);
+            box.setGravity(Gravity.CENTER);
+            box.setMinimumHeight(dp(36));
+            box.setPadding(dp(10), dp(4), dp(12), dp(4));
+            dot = new View(MainActivity.this);
+            int size = dp(9);
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(size, size);
+            dotLp.rightMargin = dp(8);
+            box.addView(dot, dotLp);
+            text = label(label, 14, true);
+            text.setSingleLine(true);
+            text.setEllipsize(TextUtils.TruncateAt.END);
+            box.addView(text);
+            setReachable(null);
+            setSelected(false);
+        }
+
+        void setSelected(boolean on) {
+            text.setTextColor(on ? Color.WHITE : TEXT);
+            box.setBackground(rounded(on ? ACCENT : CARD, dp(8)));
+        }
+
+        void setReachable(Boolean online) {
+            int color = online == null ? CHECKING : (online ? ONLINE : DANGER);
+            GradientDrawable mark = new GradientDrawable();
+            mark.setShape(GradientDrawable.OVAL);
+            mark.setColor(color);
+            dot.setBackground(mark);
+            String state = online == null ? "verifica" : (online ? "online" : "offline");
+            box.setContentDescription(text.getText() + " " + state);
+        }
     }
 
     private void stylePill(Button b, boolean on) {
@@ -434,11 +779,10 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams rowBtnLp(int weight) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+        return new LinearLayout.LayoutParams(
                 weight > 0 ? 0 : ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 weight);
-        return lp;
     }
 
     private int dp(int value) {
@@ -448,6 +792,6 @@ public final class MainActivity extends Activity {
     private static String formatSize(long size) {
         if (size < 1024) return size + " B";
         if (size < 1024 * 1024) return (size / 1024) + " KB";
-        return String.format(java.util.Locale.US, "%.1f MB", size / (1024.0 * 1024.0));
+        return String.format(Locale.US, "%.1f MB", size / (1024.0 * 1024.0));
     }
 }

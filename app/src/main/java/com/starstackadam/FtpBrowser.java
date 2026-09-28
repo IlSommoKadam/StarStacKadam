@@ -10,18 +10,18 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 
 /**
  * Client FTP anonymous PASV (Commons Net).
- * Se PASV annuncia 0.0.0.0 / loopback o IP privato non raggiungibile
- * rispetto al controllo, usa l'host di controllo (Tailscale/LAN).
+ * Il canale dati usa sempre l'indirizzo IPv4 del controllo: gli helper sul Pi
+ * annunciano spesso 0.0.0.0 o l'IP LAN, irraggiungibile via Tailscale.
  */
 public final class FtpBrowser implements AutoCloseable {
     public static final class Entry {
@@ -29,41 +29,73 @@ public final class FtpBrowser implements AutoCloseable {
         public final String path;
         public final boolean directory;
         public final long size;
+        /** Ultima modifica riportata dal LIST, epoch millis. 0 se assente. */
+        public final long modified;
 
         public Entry(String name, String path, boolean directory, long size) {
+            this(name, path, directory, size, 0L);
+        }
+
+        public Entry(String name, String path, boolean directory, long size, long modified) {
             this.name = name;
             this.path = path;
             this.directory = directory;
             this.size = size;
+            this.modified = modified;
         }
     }
 
     private final FTPClient ftp = new FTPClient();
-    private String controlHost = "";
 
     public void connect(String host, int port) throws IOException {
+        connect(host, port, 12);
+    }
+
+    public void connect(String host, int port, int timeoutSec) throws IOException {
         disconnectQuietly();
-        controlHost = host == null ? "" : host.trim();
-        if (controlHost.isEmpty()) throw new IOException("Host vuoto");
+        String control = host == null ? "" : host.trim();
+        if (control.isEmpty()) throw new IOException("Host vuoto");
 
-        ftp.setConnectTimeout(12_000);
-        ftp.setDefaultTimeout(30_000);
-        ftp.setDataTimeout(java.time.Duration.ofSeconds(60));
-        ftp.setPassiveNatWorkaroundStrategy(new PasvHostResolver(controlHost));
+        int sec = timeoutSec < 5 ? 12 : Math.min(timeoutSec, 120);
+        InetAddress address = preferIpv4(control);
+        // Il Pi annuncia spesso l'IP LAN o 0.0.0.0 nel PASV. La sessione dati
+        // deve tornare sull'indirizzo con cui il controllo è già connesso.
+        String dataHost = address.getHostAddress();
+        ftp.setConnectTimeout(sec * 1000);
+        ftp.setDefaultTimeout(sec * 1000);
+        ftp.setDataTimeout(java.time.Duration.ofSeconds(Math.max(30, sec * 4)));
+        ftp.setUseEPSVwithIPv4(false);
+        ftp.setRemoteVerificationEnabled(false);
+        ftp.setIpAddressFromPasvResponse(true);
+        ftp.setPassiveNatWorkaroundStrategy(hostname -> dataHost);
 
-        ftp.connect(controlHost, port);
+        ftp.connect(address, port);
+        ftp.setSoTimeout(sec * 1000);
         int reply = ftp.getReplyCode();
-        if (!FTPReply.isPositiveCompletion(reply)) {
+        if (!FTPReply.isPositiveCompletion(reply) && reply != 230) {
             disconnectQuietly();
-            throw new IOException("FTP rifiutato: " + ftp.getReplyString());
-        }
-        if (!ftp.login("anonymous", "starstackadam@")) {
-            disconnectQuietly();
-            throw new IOException("Login anonymous fallito: " + ftp.getReplyString());
+            throw new IOException("FTP rifiutato: " + oneLine(ftp.getReplyString()));
         }
         ftp.enterLocalPassiveMode();
+        loginFlexible();
         ftp.setFileType(FTP.BINARY_FILE_TYPE);
         ftp.setKeepAlive(true);
+    }
+
+    /**
+     * Il controllo FTP risponde e accetta il login.
+     * Non dipende dal canale dati: un server acceso non deve risultare offline
+     * solo perché il PASV annuncia un IP irraggiungibile.
+     */
+    public static boolean reachable(String host, int port, int timeoutSec) {
+        int sec = timeoutSec < 5 ? 8 : Math.min(timeoutSec, 12);
+        try (FtpBrowser ftp = new FtpBrowser()) {
+            ftp.connect(host, port, sec);
+            ftp.pwd();
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     public boolean isConnected() {
@@ -89,21 +121,120 @@ public final class FtpBrowser implements AutoCloseable {
         if (path != null && !path.isEmpty()) cwd(path);
         String cwd = pwd();
         FTPFile[] files = ftp.listFiles();
-        if (files == null) {
-            throw new IOException("LIST fallito: " + ftp.getReplyString());
+        int reply = ftp.getReplyCode();
+        if (reply >= 400) {
+            throw new IOException("LIST fallito: " + oneLine(ftp.getReplyString()));
         }
+        if (files != null && files.length > 0) {
+            List<Entry> parsed = entriesFromFiles(cwd, files);
+            if (!parsed.isEmpty()) return parsed;
+        }
+        String[] names = ftp.listNames();
+        if (names != null && names.length > 0) {
+            return entriesFromNames(cwd, names);
+        }
+        if (files == null) {
+            throw new IOException("LIST fallito: " + oneLine(ftp.getReplyString()));
+        }
+        return new ArrayList<>();
+    }
+
+    private List<Entry> entriesFromFiles(String cwd, FTPFile[] files) {
         List<Entry> out = new ArrayList<>();
         for (FTPFile file : files) {
             if (file == null) continue;
             String name = file.getName();
             if (name == null || name.isEmpty() || ".".equals(name) || "..".equals(name)) continue;
             String child = joinPath(cwd, name);
-            out.add(new Entry(name, child, file.isDirectory(), file.getSize()));
+            long modified = 0L;
+            if (file.getTimestamp() != null) {
+                modified = file.getTimestamp().getTimeInMillis();
+            }
+            out.add(new Entry(name, child, file.isDirectory(), file.getSize(), modified));
         }
+        return sortEntries(out);
+    }
+
+    /** LIST illeggibile: NLST dà i nomi, il tipo si prova con CWD. */
+    private List<Entry> entriesFromNames(String cwd, String[] names) throws IOException {
+        List<Entry> out = new ArrayList<>();
+        for (String raw : names) {
+            if (raw == null) continue;
+            String name = raw.trim();
+            if (name.isEmpty() || ".".equals(name) || "..".equals(name)) continue;
+            boolean markedDir = name.endsWith("/");
+            if (markedDir) name = name.substring(0, name.length() - 1);
+            int slash = name.lastIndexOf('/');
+            if (slash >= 0) name = name.substring(slash + 1);
+            if (name.isEmpty() || ".".equals(name) || "..".equals(name)) continue;
+            String child = joinPath(cwd, name);
+            boolean directory = markedDir || isDirectoryPath(cwd, child, name);
+            out.add(new Entry(name, child, directory, 0L, 0L));
+        }
+        return sortEntries(out);
+    }
+
+    private boolean isDirectoryPath(String cwd, String child, String name) throws IOException {
+        if (isImageName(name) || isFitsName(name)) return false;
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".json") || lower.endsWith(".txt") || lower.endsWith(".csv")) return false;
+        boolean directory = ftp.changeWorkingDirectory(child);
+        if (directory) ftp.changeWorkingDirectory(cwd);
+        return directory;
+    }
+
+    private static List<Entry> sortEntries(List<Entry> out) {
         out.sort(Comparator
                 .comparing((Entry e) -> !e.directory)
                 .thenComparing(e -> e.name.toLowerCase(Locale.ROOT)));
         return out;
+    }
+
+    private void loginFlexible() throws IOException {
+        if (ftp.getReplyCode() == 230) return;
+        String[][] attempts = {
+                {"anonymous", "starstackadam@"},
+                {"anonymous", "anonymous"},
+                {"anonymous", ""},
+                {"ftp", "ftp"}
+        };
+        String last = oneLine(ftp.getReplyString());
+        for (String[] attempt : attempts) {
+            if (!ftp.isConnected()) break;
+            try {
+                if (ftp.login(attempt[0], attempt[1]) || ftp.getReplyCode() == 230) return;
+                last = oneLine(ftp.getReplyString());
+            } catch (IOException e) {
+                last = e.getMessage() == null ? "login interrotto" : e.getMessage();
+                if (!ftp.isConnected()) break;
+            }
+        }
+        try {
+            String dir = ftp.printWorkingDirectory();
+            if (dir != null && !dir.isEmpty()) return;
+        } catch (IOException ignored) {
+        }
+        disconnectQuietly();
+        throw new IOException("Login FTP fallito: " + last);
+    }
+
+    private static InetAddress preferIpv4(String host) throws IOException {
+        InetAddress[] all;
+        try {
+            all = InetAddress.getAllByName(host);
+        } catch (UnknownHostException e) {
+            throw new IOException("Host sconosciuto: " + host, e);
+        }
+        if (all == null || all.length == 0) throw new IOException("Host sconosciuto: " + host);
+        for (InetAddress address : all) {
+            if (address instanceof Inet4Address) return address;
+        }
+        return all[0];
+    }
+
+    private static String oneLine(String reply) {
+        if (reply == null) return "";
+        return reply.replace('\r', ' ').replace('\n', ' ').trim();
     }
 
     public void retr(String remotePath, File dest) throws IOException {
@@ -191,45 +322,4 @@ public final class FtpBrowser implements AutoCloseable {
         return lower.endsWith(".fits") || lower.endsWith(".fit") || lower.endsWith(".fts");
     }
 
-    private static final class PasvHostResolver implements FTPClient.HostnameResolver {
-        private final String controlHost;
-
-        PasvHostResolver(String controlHost) {
-            this.controlHost = controlHost;
-        }
-
-        @Override
-        public String resolve(String hostname) throws UnknownHostException {
-            if (shouldUseControlHost(hostname, controlHost)) {
-                return controlHost;
-            }
-            return hostname;
-        }
-    }
-
-    static boolean shouldUseControlHost(String pasvHost, String controlHost) {
-        if (pasvHost == null || pasvHost.isEmpty()) return true;
-        String host = pasvHost.trim();
-        if ("0.0.0.0".equals(host) || host.startsWith("0.")
-                || host.startsWith("127.") || "localhost".equalsIgnoreCase(host)) {
-            return true;
-        }
-        if (controlHost == null || controlHost.isEmpty()) return false;
-        if (host.equalsIgnoreCase(controlHost)) return false;
-        try {
-            InetAddress pasv = InetAddress.getByName(host);
-            if (pasv.isAnyLocalAddress() || pasv.isLoopbackAddress()) return true;
-            InetAddress control = InetAddress.getByName(controlHost);
-            // Private mismatch: PASV privato ma controllo altrove (es. Tailscale 100.x).
-            if (pasv.isSiteLocalAddress() && !control.isSiteLocalAddress()) return true;
-            if (pasv.isSiteLocalAddress()
-                    && control.isSiteLocalAddress()
-                    && !Arrays.equals(pasv.getAddress(), control.getAddress())) {
-                return true;
-            }
-        } catch (UnknownHostException ignored) {
-            return true;
-        }
-        return false;
-    }
 }

@@ -1,0 +1,79 @@
+package com.starstackadam;
+
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+
+/** Oggetto salvato sul disco: sigla di cartella, nome comune, date, pose. */
+public final class SkyObject {
+    public enum Kind {
+        GALAXY, STAR, NEBULA, OTHER
+    }
+
+    public final Kind kind;
+    /** Sigla come sta nel nome della cartella (M31, NGC 7000, …). */
+    public final String registeredName;
+    public final String scientificName;
+    /** Nome comune, dalla mappa {@link CommonNames#COMMON_NAME}. */
+    public final String publicName;
+    public final String folderPath;
+    public final List<String> imagePaths;
+    /** Date di acquisizione {@code yyyy-MM-dd}, in ordine. */
+    public final List<String> acquisitionDates;
+
+    public SkyObject(
+            Kind kind,
+            String registeredName,
+            String scientificName,
+            String publicName,
+            String folderPath,
+            List<String> imagePaths,
+            List<String> acquisitionDates) {
+        this.kind = kind == null ? Kind.OTHER : kind;
+        this.registeredName = registeredName == null ? "" : registeredName.trim();
+        this.scientificName = scientificName == null ? "" : scientificName.trim();
+        this.publicName = publicName == null ? "" : publicName.trim();
+        this.folderPath = folderPath == null ? "/" : folderPath;
+        this.imagePaths = Collections.unmodifiableList(
+                new ArrayList<>(imagePaths == null ? List.of() : imagePaths));
+        List<String> dates = new ArrayList<>();
+        if (acquisitionDates != null) {
+            for (String date : acquisitionDates) {
+                if (date != null && !date.isBlank() && !dates.contains(date)) dates.add(date);
+            }
+        }
+        this.acquisitionDates = Collections.unmodifiableList(dates);
+    }
+
+    public int frameCount() {
+        return imagePaths.size();
+    }
+
+    public String datesLabel() {
+        if (acquisitionDates.isEmpty()) return "";
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.ITALY);
+        StringBuilder sb = new StringBuilder();
+        for (String iso : acquisitionDates) {
+            if (sb.length() > 0) sb.append(", ");
+            try {
+                sb.append(LocalDate.parse(iso).format(fmt));
+            } catch (DateTimeParseException e) {
+                sb.append(iso);
+            }
+        }
+        return sb.toString();
+    }
+
+    public String kindLabel() {
+        return switch (kind) {
+            case GALAXY -> "Galassia";
+            case STAR -> "Stella";
+            case NEBULA -> "Nebulosa";
+            case OTHER -> "Altro";
+        };
+    }
+}

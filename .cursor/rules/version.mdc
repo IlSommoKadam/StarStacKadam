@@ -1,0 +1,25 @@
+---
+description: Aumenta versionName e versionCode a ogni modifica dell'app
+alwaysApply: true
+---
+
+# Versione StarStacKadam
+
+`versionName` parte da **0.0.1**. A ogni modifica del progetto aumenta l’ultimo numero (`0.0.2`, `0.0.3`, …) e `versionCode` di 1, nello stesso cambiamento.
+
+- Fonte: `app/build.gradle` (`versionName`, `versionCode`)
+- In UI si legge da `AppVersion`, non da una stringa fissa
+- Aggiorna la riga versione nel README quando cambi `versionName`
+
+## Mega, subito
+
+Appena c’è una nuova `versionName`, nello stesso intervento pubblica l’APK. Non chiudere il lavoro con la versione solo nel codice.
+
+1. `.\gradlew.bat :app:assembleDebug` — copia `StarStacKadam.apk` e `starstackadam-version.json` in `C:\WORK\ESA\Share`
+2. Con MEGAcmd già loggato, carica quei due file in `/Share/pub` (cartella pubblica `https://mega.nz/folder/HswU1QqC#862Zb92yZ0Upn1PXgW5EKA`):
+
+```bat
+"%LOCALAPPDATA%\MEGAcmd\mega-put.bat" -c "C:\WORK\ESA\Share\StarStacKadam.apk" "C:\WORK\ESA\Share\starstackadam-version.json" /Share/pub
+```
+
+Se il nome esiste già, sostituiscilo (`mega-rm` del file remoto, poi `mega-put`). Controlla con `mega-ls /Share/pub` che versione e APK siano quelli nuovi.

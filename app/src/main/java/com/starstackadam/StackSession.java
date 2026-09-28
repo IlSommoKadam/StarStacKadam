@@ -5,11 +5,17 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Stack MEAN streaming: frame 0 = fitEdge(1280) come canvas;
- * successivi = resample stesso WxH → stars → align → warp → accumulate.
- * BackgroundFit solo se richiesto; Median/Sigma mai usati qui.
+ * Due modalità, con i parametri letti da Impostazioni.
+ * Live (prestazioni): MEAN streaming, lato più corto, le pose deboli restano.
+ * Condivisibile (qualità): lato più lungo, le pose sotto soglia si escludono;
+ * il PNG + scheda JSON si salva a fine lavoro.
+ * Median/Sigma restano nel motore ma non qui: tengono tutti i frame in RAM.
  */
 public final class StackSession {
+    public enum Mode {
+        LIVE, SHARE
+    }
+
     public interface Listener {
         void onProgress(StackProgress progress);
     }
@@ -24,6 +30,11 @@ public final class StackSession {
         public final float levelBlack;
         public final float levelWhite;
         public final float levelGamma;
+        public final Mode mode;
+        public final String scientificName;
+        public final String publicName;
+        public final HostSettingsStore.StackOptions profile;
+        public final int ftpTimeoutSec;
 
         public Request(
                 String host,
@@ -31,7 +42,8 @@ public final class StackSession {
                 List<String> remotePaths,
                 List<String> localFiles,
                 boolean backgroundFit) {
-            this(host, port, remotePaths, localFiles, backgroundFit, false, 0f, 1f, 1f);
+            this(host, port, remotePaths, localFiles, backgroundFit, false, 0f, 1f, 1f,
+                    Mode.LIVE, "", "");
         }
 
         public Request(
@@ -43,7 +55,30 @@ public final class StackSession {
                 boolean useLevels,
                 float levelBlack,
                 float levelWhite,
-                float levelGamma) {
+                float levelGamma,
+                Mode mode,
+                String scientificName,
+                String publicName) {
+            this(host, port, remotePaths, localFiles, backgroundFit, useLevels,
+                    levelBlack, levelWhite, levelGamma, mode, scientificName, publicName,
+                    null, 12);
+        }
+
+        public Request(
+                String host,
+                int port,
+                List<String> remotePaths,
+                List<String> localFiles,
+                boolean backgroundFit,
+                boolean useLevels,
+                float levelBlack,
+                float levelWhite,
+                float levelGamma,
+                Mode mode,
+                String scientificName,
+                String publicName,
+                HostSettingsStore.StackOptions profile,
+                int ftpTimeoutSec) {
             this.host = host;
             this.port = port;
             this.remotePaths = remotePaths == null ? List.of() : new ArrayList<>(remotePaths);
@@ -53,11 +88,13 @@ public final class StackSession {
             this.levelBlack = levelBlack;
             this.levelWhite = levelWhite;
             this.levelGamma = levelGamma;
+            this.mode = mode == null ? Mode.LIVE : mode;
+            this.scientificName = scientificName == null ? "" : scientificName;
+            this.publicName = publicName == null ? "" : publicName;
+            this.profile = profile;
+            this.ftpTimeoutSec = ftpTimeoutSec < 5 ? 12 : ftpTimeoutSec;
         }
     }
-
-    private static final int MAX_EDGE = 1280;
-    private static final int MAX_STARS = 40;
 
     private final FrameCache cache;
     private volatile boolean cancelRequested;
@@ -102,9 +139,20 @@ public final class StackSession {
         levelWhite = request.levelWhite;
         levelGamma = request.levelGamma;
 
+        final boolean share = request.mode == Mode.SHARE;
+        final HostSettingsStore.StackOptions opt = request.profile != null
+                ? request.profile
+                : (share
+                ? HostSettingsStore.StackOptions.shareQuality()
+                : HostSettingsStore.StackOptions.liveBalanced());
+        final int maxEdge = opt.maxEdge;
+        final int maxStars = opt.maxStars;
+        final int minVotes = opt.minVotes;
+        final String objectLabel = objectLabel(request);
+
         int total = request.remotePaths.size();
         if (total == 0) {
-            listener.onProgress(StackProgress.failed(0, 0, 0, "Nessun frame selezionato"));
+            listener.onProgress(StackProgress.failed(0, 0, 0, "Nessuna posa nell'oggetto"));
             return;
         }
 
@@ -129,7 +177,7 @@ public final class StackSession {
                 if (!cache.hasValid(local)) {
                     if (ftp == null) {
                         ftp = new FtpBrowser();
-                        ftp.connect(request.host, request.port);
+                        ftp.connect(request.host, request.port, request.ftpTimeoutSec);
                     }
                     listener.onProgress(StackProgress.running(
                             i, total, lastVotes, unaligned,
@@ -145,16 +193,16 @@ public final class StackSession {
 
                 ImagePlane plane;
                 try {
-                    plane = FrameDecoder.decode(local, MAX_EDGE);
+                    plane = FrameDecoder.decode(local, maxEdge);
                 } catch (Exception decodeFail) {
                     cache.invalidate(local);
                     throw decodeFail;
                 }
                 if (i == 0) {
-                    plane = plane.fitEdge(MAX_EDGE);
+                    plane = plane.fitEdge(maxEdge);
                     width = plane.width;
                     height = plane.height;
-                    refStars = StarFinder.find(plane, MAX_STARS);
+                    refStars = StarFinder.find(plane, maxStars);
                     sum = new double[width * height * 3];
                     count = new int[width * height];
                     StackCombine.accumulate(sum, count, plane);
@@ -163,11 +211,20 @@ public final class StackSession {
                     if (plane.width != width || plane.height != height) {
                         plane = plane.resample(width, height);
                     }
-                    List<StarFinder.Star> stars = StarFinder.find(plane, MAX_STARS);
+                    List<StarFinder.Star> stars = StarFinder.find(plane, maxStars);
                     FrameAlign.Transform transform = FrameAlign.match(refStars, stars, width, height);
                     lastVotes = transform.votes;
-                    if (transform.votes < 4) {
+                    if (transform.votes < minVotes) {
                         unaligned++;
+                        if (opt.rejectUnaligned) {
+                            String skip = "Esclusa " + baseName(remote) + " (non allineata)";
+                            if (!objectLabel.isEmpty()) skip = objectLabel + " — " + skip;
+                            listener.onProgress(StackProgress.running(
+                                    i + 1, total, lastVotes, unaligned, skip,
+                                    lastStacked, lastPreviewW, lastPreviewH,
+                                    lastStacked == null ? null : buildPreview(lastStacked).argb));
+                            continue;
+                        }
                     }
                     ImagePlane warped = FrameAlign.warp(plane, transform);
                     StackCombine.accumulate(sum, count, warped);
@@ -178,13 +235,14 @@ public final class StackSession {
                 lastPreviewW = mean.width;
                 lastPreviewH = mean.height;
 
-                String note = "MEAN " + (i + 1) + "/" + total;
+                String note = (share ? "Condivisibile " : "Live ") + (i + 1) + "/" + total;
+                if (!objectLabel.isEmpty()) note = objectLabel + " — " + note;
                 Preview preview = buildPreview(mean);
                 if (preview.fitNote != null && !preview.fitNote.isEmpty()) {
                     note = note + " — " + preview.fitNote;
                 }
                 if (unaligned > 0) {
-                    note = note + " — non allineati: " + unaligned;
+                    note = note + (opt.rejectUnaligned ? " — escluse: " : " — non allineate: ") + unaligned;
                 }
                 listener.onProgress(StackProgress.running(
                         i + 1, total, lastVotes, unaligned, note,
@@ -196,8 +254,16 @@ public final class StackSession {
                 return;
             }
             Preview preview = buildPreview(lastStacked);
-            String doneNote = "Stack preview (JPEG) MEAN — " + total + " frame";
-            if (unaligned > 0) doneNote += " — non allineati: " + unaligned;
+            int used = opt.rejectUnaligned ? total - unaligned : total;
+            String doneNote = share
+                    ? "Stack condivisibile — " + used + " pose, lato " + maxEdge
+                    : "Visione live — " + used + " pose, lato " + maxEdge;
+            if (!objectLabel.isEmpty()) doneNote = objectLabel + " — " + doneNote;
+            if (unaligned > 0) {
+                doneNote += opt.rejectUnaligned
+                        ? " — escluse " + unaligned
+                        : " — non allineate " + unaligned;
+            }
             if (preview.fitNote != null && !preview.fitNote.isEmpty()) {
                 doneNote = doneNote + " — " + preview.fitNote;
             }
@@ -262,6 +328,14 @@ public final class StackSession {
             }
         }
         return cache.fileFor(request.host, request.port, remote);
+    }
+
+    private static String objectLabel(Request request) {
+        String sci = request.scientificName == null ? "" : request.scientificName.trim();
+        String pub = request.publicName == null ? "" : request.publicName.trim();
+        if (sci.isEmpty()) return pub;
+        if (pub.isEmpty() || pub.equalsIgnoreCase(sci)) return sci;
+        return sci + " · " + pub;
     }
 
     private static String baseName(String path) {

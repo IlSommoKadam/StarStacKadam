@@ -4,7 +4,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 /**
- * Host Tailscale/LAN del Raspberry e porte FTP Helper.
+ * Endpoint FTP di HD e Vespera, indipendenti.
  * Default: stesso host Pi, HD {@value #PORT_HD}, Vespera {@value #PORT_VESPERA}.
  */
 public final class HostSettingsStore {
@@ -26,6 +26,20 @@ public final class HostSettingsStore {
     private static final String KEY_VESPERA_ENDPOINT = "vespera_endpoint";
     private static final String KEY_SOURCE = "source";
     private static final String KEY_LAST_DIR = "last_dir";
+    private static final String KEY_FTP_TIMEOUT = "ftp_timeout_sec";
+    private static final String KEY_LIVE_EDGE = "live_edge";
+    private static final String KEY_LIVE_STARS = "live_stars";
+    private static final String KEY_LIVE_VOTES = "live_votes";
+    private static final String KEY_LIVE_REJECT = "live_reject";
+    private static final String KEY_LIVE_BG = "live_bg";
+    private static final String KEY_SHARE_EDGE = "share_edge";
+    private static final String KEY_SHARE_STARS = "share_stars";
+    private static final String KEY_SHARE_VOTES = "share_votes";
+    private static final String KEY_SHARE_REJECT = "share_reject";
+    private static final String KEY_SHARE_BG = "share_bg";
+
+    /** Timeout di connessione FTP, in secondi. */
+    public static final int[] FTP_TIMEOUTS = {8, 12, 20, 30, 45};
 
     private final SharedPreferences prefs;
 
@@ -75,7 +89,6 @@ public final class HostSettingsStore {
         Endpoint parsed = Endpoint.parse(endpoint, PORT_VESPERA);
         prefs.edit()
                 .putString(KEY_VESPERA_ENDPOINT, parsed.host + ":" + parsed.port)
-                .putString(KEY_HOST, parsed.host)
                 .apply();
     }
 
@@ -87,16 +100,88 @@ public final class HostSettingsStore {
     public void setHost(String host) {
         String h = host == null ? "" : host.trim();
         if (h.isEmpty()) h = DEFAULT_PI_HOST;
-        // Se l’utente scrive solo l’host (senza porta), aggiorna entrambi gli endpoint.
+        // Se l’utente scrive solo l’host (senza porta), aggiorna entrambi gli endpoint
+        // tenendo le porte già scelte in Impostazioni.
         if (!h.contains(":")) {
             prefs.edit()
                     .putString(KEY_HOST, h)
-                    .putString(KEY_HD_ENDPOINT, h + ":" + PORT_HD)
-                    .putString(KEY_VESPERA_ENDPOINT, h + ":" + PORT_VESPERA)
+                    .putString(KEY_HD_ENDPOINT, h + ":" + getHdPort())
+                    .putString(KEY_VESPERA_ENDPOINT, h + ":" + getVesperaPort())
                     .apply();
             return;
         }
         setEndpoint(h);
+    }
+
+    public int getHdPort() {
+        return Endpoint.parse(getHdEndpoint(), PORT_HD).port;
+    }
+
+    public int getVesperaPort() {
+        return Endpoint.parse(getVesperaEndpoint(), PORT_VESPERA).port;
+    }
+
+    public int getFtpTimeoutSec() {
+        return StackOptions.nearest(prefs.getInt(KEY_FTP_TIMEOUT, 12), FTP_TIMEOUTS);
+    }
+
+    public StackOptions getLiveOptions() {
+        return StackOptions.live(
+                prefs.getInt(KEY_LIVE_EDGE, 1280),
+                prefs.getInt(KEY_LIVE_STARS, 40),
+                prefs.getInt(KEY_LIVE_VOTES, 4),
+                prefs.getBoolean(KEY_LIVE_REJECT, false),
+                prefs.getBoolean(KEY_LIVE_BG, false));
+    }
+
+    public StackOptions getShareOptions() {
+        return StackOptions.share(
+                prefs.getInt(KEY_SHARE_EDGE, 2048),
+                prefs.getInt(KEY_SHARE_STARS, 40),
+                prefs.getInt(KEY_SHARE_VOTES, 4),
+                prefs.getBoolean(KEY_SHARE_REJECT, true),
+                prefs.getBoolean(KEY_SHARE_BG, false));
+    }
+
+    /**
+     * Salva i due endpoint, il timeout e i due profili di stack.
+     * HD e Vespera possono avere host e porta diversi.
+     */
+    public void saveSettings(
+            String hdEndpoint,
+            String vesperaEndpoint,
+            int timeoutSec,
+            StackOptions live,
+            StackOptions share) {
+        Endpoint hd = Endpoint.parse(hdEndpoint, PORT_HD);
+        Endpoint ve = Endpoint.parse(vesperaEndpoint, PORT_VESPERA);
+        String hdHost = hd.host.isEmpty() ? DEFAULT_PI_HOST : hd.host;
+        String veHost = ve.host.isEmpty() ? DEFAULT_PI_HOST : ve.host;
+        int hdPort = clampPort(hd.port, PORT_HD);
+        int vePort = clampPort(ve.port, PORT_VESPERA);
+        StackOptions liveSafe = live == null ? StackOptions.liveBalanced() : live;
+        StackOptions shareSafe = share == null ? StackOptions.shareQuality() : share;
+        prefs.edit()
+                .putString(KEY_HOST, hdHost)
+                .putString(KEY_HD_ENDPOINT, hdHost + ":" + hdPort)
+                .putString(KEY_VESPERA_ENDPOINT, veHost + ":" + vePort)
+                .putInt(KEY_FTP_TIMEOUT, StackOptions.nearest(timeoutSec, FTP_TIMEOUTS))
+                .putInt(KEY_LIVE_EDGE, liveSafe.maxEdge)
+                .putInt(KEY_LIVE_STARS, liveSafe.maxStars)
+                .putInt(KEY_LIVE_VOTES, liveSafe.minVotes)
+                .putBoolean(KEY_LIVE_REJECT, liveSafe.rejectUnaligned)
+                .putBoolean(KEY_LIVE_BG, liveSafe.subtractBackground)
+                .putInt(KEY_SHARE_EDGE, shareSafe.maxEdge)
+                .putInt(KEY_SHARE_STARS, shareSafe.maxStars)
+                .putInt(KEY_SHARE_VOTES, shareSafe.minVotes)
+                .putBoolean(KEY_SHARE_REJECT, shareSafe.rejectUnaligned)
+                .putBoolean(KEY_SHARE_BG, shareSafe.subtractBackground)
+                .apply();
+    }
+
+    private static int clampPort(int port, int fallback) {
+        if (port > 0 && port < 65536) return port;
+        return fallback;
     }
 
     /** true = HD (:2121), false = Vespera (:2122). */
@@ -143,6 +228,109 @@ public final class HostSettingsStore {
                 .putString(KEY_HD_ENDPOINT, host + ":" + PORT_HD)
                 .putString(KEY_VESPERA_ENDPOINT, host + ":" + PORT_VESPERA)
                 .apply();
+    }
+
+    /**
+     * Parametri di uno dei due stack.
+     * Live (prestazioni) di default non scarta le pose deboli e sta su un lato più corto.
+     * Condivisibile (qualità) di default esclude le pose sotto soglia e sale di risoluzione.
+     */
+    public static final class StackOptions {
+        public static final int[] LIVE_EDGES = {640, 960, 1280, 1600};
+        public static final int[] SHARE_EDGES = {1280, 1600, 2048, 2560};
+        public static final int[] STARS = {24, 40, 60, 80};
+        public static final int[] VOTES = {3, 4, 6, 8};
+
+        public final int maxEdge;
+        public final int maxStars;
+        public final int minVotes;
+        public final boolean rejectUnaligned;
+        public final boolean subtractBackground;
+
+        private StackOptions(
+                int maxEdge,
+                int maxStars,
+                int minVotes,
+                boolean rejectUnaligned,
+                boolean subtractBackground) {
+            this.maxEdge = maxEdge;
+            this.maxStars = maxStars;
+            this.minVotes = minVotes;
+            this.rejectUnaligned = rejectUnaligned;
+            this.subtractBackground = subtractBackground;
+        }
+
+        public static StackOptions live(
+                int edge, int stars, int votes, boolean reject, boolean background) {
+            return new StackOptions(
+                    nearest(edge, LIVE_EDGES),
+                    nearest(stars, STARS),
+                    nearest(votes, VOTES),
+                    reject,
+                    background);
+        }
+
+        public static StackOptions share(
+                int edge, int stars, int votes, boolean reject, boolean background) {
+            return new StackOptions(
+                    nearest(edge, SHARE_EDGES),
+                    nearest(stars, STARS),
+                    nearest(votes, VOTES),
+                    reject,
+                    background);
+        }
+
+        public static StackOptions livePerformance() {
+            return live(960, 24, 3, false, false);
+        }
+
+        public static StackOptions liveBalanced() {
+            return live(1280, 40, 4, false, false);
+        }
+
+        public static StackOptions liveSharp() {
+            return live(1600, 40, 4, false, false);
+        }
+
+        public static StackOptions shareFast() {
+            return share(1600, 40, 4, true, false);
+        }
+
+        public static StackOptions shareQuality() {
+            return share(2048, 40, 4, true, false);
+        }
+
+        public static StackOptions shareMax() {
+            return share(2560, 60, 6, true, true);
+        }
+
+        public boolean same(StackOptions other) {
+            return other != null
+                    && maxEdge == other.maxEdge
+                    && maxStars == other.maxStars
+                    && minVotes == other.minVotes
+                    && rejectUnaligned == other.rejectUnaligned
+                    && subtractBackground == other.subtractBackground;
+        }
+
+        public String summary() {
+            return maxEdge + " px · " + maxStars + " stelle · voti ≥ " + minVotes
+                    + (rejectUnaligned ? " · esclude le pose deboli" : " · tiene le pose deboli")
+                    + (subtractBackground ? " · fondo sottratto" : "");
+        }
+
+        public static int nearest(int value, int[] allowed) {
+            int best = allowed[0];
+            int dist = Math.abs(value - best);
+            for (int i = 1; i < allowed.length; i++) {
+                int d = Math.abs(value - allowed[i]);
+                if (d < dist) {
+                    dist = d;
+                    best = allowed[i];
+                }
+            }
+            return best;
+        }
     }
 
     /** host + porta da stringa {@code host}, {@code host:port} o {@code ftp://host:port}. */

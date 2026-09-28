@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">StarStacKadam</string>
+    <!-- Stessa cartella pubblica di ESA Meter. L'app legge starstackadam-version.json. -->
+    <string name="mega_version_url" translatable="false">https://mega.nz/folder/HswU1QqC#862Zb92yZ0Upn1PXgW5EKA</string>
 </resources>
