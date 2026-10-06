@@ -32,7 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Home: tab Oggetti (scan delle cartelle) e tab File FTP (scroll delle directory).
+ * Home: tab Oggetti (nomi cartella subito, pose al tocco) e tab File FTP.
  */
 public final class MainActivity extends Activity {
     public static final String EXTRA_HOST = "host";
@@ -87,6 +87,8 @@ public final class MainActivity extends Activity {
     private int sessionPort = HostSettingsStore.PORT_HD;
     private String boundEndpoint = "";
     private int connectGen;
+    private int detailGen;
+    private String loadingPath = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -111,6 +113,7 @@ public final class MainActivity extends Activity {
         super.onResume();
         if (store == null) return;
         probeEndpoints();
+        AppUpdates.checkWhenVisible(this);
         String now = store.getEndpoint();
         if (!now.equals(boundEndpoint)) {
             boundEndpoint = now;
@@ -191,12 +194,18 @@ public final class MainActivity extends Activity {
         connectBtn.setOnClickListener(v -> connect());
         root.addView(connectBtn);
 
-        statusView = label("Connessione…", 13, false);
-        statusView.setTextColor(MUTED);
+        statusView = label("Connessione…", 14, true);
+        statusView.setTextColor(TEXT);
+        statusView.setShadowLayer(dp(4), 0, dp(1), 0xF0000000);
         statusView.setSingleLine(true);
         statusView.setEllipsize(TextUtils.TruncateAt.END);
-        statusView.setPadding(0, dp(8), 0, dp(6));
-        root.addView(statusView);
+        statusView.setBackground(rounded(0xE6101824, dp(8)));
+        statusView.setPadding(dp(10), dp(6), dp(10), dp(6));
+        LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        statusLp.topMargin = dp(8);
+        statusLp.bottomMargin = dp(6);
+        root.addView(statusView, statusLp);
 
         FrameLayout pages = new FrameLayout(this);
         objectPane = buildObjectPane();
@@ -208,7 +217,7 @@ public final class MainActivity extends Activity {
         root.addView(pages, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        liveBtn = actionButton("Visione live", ACCENT);
+        liveBtn = actionButton("Anteprima Vespera", ACCENT);
         liveBtn.setOnClickListener(v -> startStack(StackSession.Mode.LIVE));
         shareBtn = actionButton("Stack condivisibile", SHARE);
         shareBtn.setOnClickListener(v -> startStack(StackSession.Mode.SHARE));
@@ -371,54 +380,51 @@ public final class MainActivity extends Activity {
             setStatus("Endpoint " + sourceName + " mancante. Aprilo in Impostazioni.", true);
             return;
         }
+        detailGen++;
+        loadingPath = "";
         String host = endpoint.host;
         int port = endpoint.port;
         int timeout = store.getFtpTimeoutSec();
         String startDir = store.getLastDir();
         int gen = ++connectGen;
         connectBtn.setEnabled(false);
-        setStatus("Lettura oggetti " + sourceName + "…", false);
+        setStatus("Elenco cartelle " + sourceName + "…", false);
         executor.execute(() -> {
             try (FtpBrowser ftp = new FtpBrowser()) {
                 ftp.connect(host, port, timeout);
-                List<SkyObject> listed = ObjectCatalog.scan(ftp, getCacheDir());
-                String dir = startDir == null || startDir.isEmpty() ? "/" : startDir;
-                List<FtpBrowser.Entry> files;
-                try {
-                    files = ftp.list(dir);
-                    dir = ftp.pwd();
-                } catch (Exception ignored) {
-                    dir = "/";
-                    files = ftp.list("/");
-                    dir = ftp.pwd();
-                }
-                String finalDir = dir;
-                List<FtpBrowser.Entry> finalFiles = files;
+                List<SkyObject> listed = ObjectCatalog.outline(ftp);
                 main.post(() -> {
                     if (gen != connectGen || isDestroyed()) return;
                     sessionHost = host;
                     sessionPort = port;
                     boundEndpoint = host + ":" + port;
-                    currentDir = finalDir;
-                    store.setLastDir(finalDir);
                     connected = true;
                     objects.clear();
                     objects.addAll(listed);
                     selected = null;
                     pickedPaths.clear();
+                    loadingPath = "";
                     connectBtn.setEnabled(true);
                     showObjects();
-                    showFtpEntries(finalFiles);
-                    upBtn.setEnabled(!"/".equals(finalDir));
+                    upBtn.setEnabled(!"/".equals(currentDir));
+                    int waiting = 0;
+                    for (SkyObject object : listed) {
+                        if (!object.detailsReady) waiting++;
+                    }
                     if (listed.isEmpty()) {
-                        setStatus(finalFiles.isEmpty()
-                                ? "Connesso a " + sourceName + ". Cartella vuota."
-                                : "Connesso a " + sourceName + ". Nessuna posa JPEG/PNG.", false);
+                        setStatus("Connesso a " + sourceName + ". Nessuna cartella di osservazione.", false);
+                    } else if (waiting > 0) {
+                        setStatus(listed.size() + " oggetti su " + sourceName
+                                + ". Tocca per caricare le pose.", false);
                     } else {
                         setStatus("Trovati " + listed.size()
                                 + " oggetti su " + sourceName + ". Scegline uno.", false);
                     }
                     updateStartEnabled();
+                    if (!objectsTab) {
+                        String dir = startDir == null || startDir.isEmpty() ? "/" : startDir;
+                        openDir(dir);
+                    }
                 });
             } catch (Exception e) {
                 String msg = e.getMessage();
@@ -496,13 +502,8 @@ public final class MainActivity extends Activity {
         for (FtpBrowser.Entry entry : listed) {
             if (entry.directory) {
                 ftpListBox.addView(dirRow(entry));
-            } else if (FtpBrowser.isImageName(entry.name)) {
+            } else if (FtpBrowser.isImageName(entry.name) || FtpBrowser.isFitsName(entry.name)) {
                 ftpListBox.addView(fileRow(entry));
-            } else if (FtpBrowser.isFitsName(entry.name)) {
-                TextView fits = label(entry.name + " (FITS non supportato)", 13, false);
-                fits.setTextColor(MUTED);
-                fits.setPadding(dp(12), dp(8), dp(12), dp(8));
-                ftpListBox.addView(fits);
             }
         }
     }
@@ -520,6 +521,7 @@ public final class MainActivity extends Activity {
         box.setText(entry.name + "  (" + formatSize(entry.size) + ")");
         box.setTextColor(TEXT);
         box.setPadding(dp(8), dp(10), dp(8), dp(10));
+        BlueCheck.apply(box);
         box.setChecked(pickedPaths.contains(entry.path));
         box.setOnCheckedChangeListener((buttonView, isChecked) -> {
             if (isChecked) pickedPaths.add(entry.path);
@@ -578,24 +580,99 @@ public final class MainActivity extends Activity {
         meta.setTextColor(on ? ACCENT : MUTED);
         meta.setPadding(0, dp(2), 0, 0);
         row.addView(meta);
-        row.setOnClickListener(v -> {
-            selected = object;
-            showObjects();
-            updateStartEnabled();
-            String dates = object.datesLabel();
-            StringBuilder status = new StringBuilder(object.registeredName);
-            if (!object.publicName.equalsIgnoreCase(object.registeredName)) {
-                status.append(" — ").append(object.publicName);
-            }
-            if (!dates.isEmpty()) status.append(" — ").append(dates);
-            status.append(" — ").append(object.frameCount()).append(" pose");
-            setStatus(status.toString(), false);
-        });
+        row.setOnClickListener(v -> selectObject(object));
         return row;
     }
 
-    private static String metaLine(SkyObject object) {
+    private void selectObject(SkyObject object) {
+        selected = object;
+        if (!object.detailsReady) {
+            if (!object.folderPath.equals(loadingPath)) {
+                loadObjectDetails(object);
+            } else {
+                showObjects();
+                updateStartEnabled();
+                announce(object);
+            }
+            return;
+        }
+        showObjects();
+        updateStartEnabled();
+        announce(object);
+    }
+
+    private void loadObjectDetails(SkyObject stub) {
+        String host = sessionHost;
+        int port = sessionPort;
+        int timeout = store.getFtpTimeoutSec();
+        int gen = detailGen;
+        loadingPath = stub.folderPath;
+        showObjects();
+        updateStartEnabled();
+        setStatus("Lettura pose di " + stub.registeredName + "…", false);
+        executor.execute(() -> {
+            try (FtpBrowser ftp = new FtpBrowser()) {
+                ftp.connect(host, port, timeout);
+                SkyObject full = ObjectCatalog.loadDetails(ftp, getCacheDir(), stub);
+                main.post(() -> applyLoaded(gen, stub.folderPath, full, null));
+            } catch (Exception e) {
+                String msg = e.getMessage();
+                if (msg == null || msg.isEmpty()) msg = "Lettura pose fallita";
+                String err = msg;
+                main.post(() -> applyLoaded(gen, stub.folderPath, null, err));
+            }
+        });
+    }
+
+    private void applyLoaded(int gen, String path, SkyObject full, String error) {
+        if (gen != detailGen || isDestroyed()) return;
+        if (path.equals(loadingPath)) loadingPath = "";
+        if (error != null || full == null) {
+            showObjects();
+            updateStartEnabled();
+            setStatus(error == null ? "Lettura pose fallita" : error, true);
+            return;
+        }
+        for (int i = 0; i < objects.size(); i++) {
+            if (path.equals(objects.get(i).folderPath)) {
+                objects.set(i, full);
+                break;
+            }
+        }
+        if (selected != null && path.equals(selected.folderPath)) {
+            selected = full;
+            announce(full);
+        }
+        showObjects();
+        updateStartEnabled();
+    }
+
+    private void announce(SkyObject object) {
+        StringBuilder status = new StringBuilder(object.registeredName);
+        if (!object.publicName.equalsIgnoreCase(object.registeredName)) {
+            status.append(" — ").append(object.publicName);
+        }
+        String dates = object.datesLabel();
+        if (!dates.isEmpty()) status.append(" — ").append(dates);
+        if (!object.detailsReady) {
+            status.append(" — tocca per le pose");
+        } else {
+            status.append(" — ").append(object.frameCount()).append(" pose");
+            if (object.hasPreview()) status.append(" · ").append(object.previewLabel());
+        }
+        setStatus(status.toString(), false);
+    }
+
+    private String metaLine(SkyObject object) {
+        if (!object.detailsReady) {
+            String tail = object.folderPath.equals(loadingPath) ? "lettura pose…" : "tocca per le pose";
+            String dates = object.datesLabel();
+            if (dates.isEmpty()) return object.kindLabel() + "  ·  " + tail;
+            return dates + "  ·  " + object.kindLabel() + "  ·  " + tail;
+        }
         String frames = object.frameCount() + (object.frameCount() == 1 ? " posa" : " pose");
+        if (object.fitsCount() > 0) frames = frames + " · " + object.fitsCount() + " FITS";
+        if (object.hasPreview()) frames = frames + " · " + object.previewLabel();
         String dates = object.datesLabel();
         if (dates.isEmpty()) return object.kindLabel() + "  ·  " + frames;
         return dates + "  ·  " + object.kindLabel() + "  ·  " + frames;
@@ -615,25 +692,63 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Connettiti prima all'FTP", Toast.LENGTH_SHORT).show();
             return;
         }
+        boolean live = mode == StackSession.Mode.LIVE;
+        boolean fits = mode == StackSession.Mode.SHARE && store.getShareOptions().useFits;
         ArrayList<String> paths = new ArrayList<>();
         String scientific = "";
         String pub = "";
         String kind = "";
         if (objectsTab) {
-            if (selected == null || selected.imagePaths.isEmpty()) {
-                Toast.makeText(this, "Scegli un oggetto con almeno una posa", Toast.LENGTH_SHORT).show();
+            if (selected == null) {
+                Toast.makeText(this, "Scegli un oggetto", Toast.LENGTH_SHORT).show();
                 return;
             }
-            paths.addAll(selected.imagePaths);
+            if (!selected.detailsReady) {
+                Toast.makeText(this, "Attendi la lettura delle pose", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (live) {
+                String preview = selected.lastPreviewPath();
+                if (preview.isEmpty()) {
+                    Toast.makeText(this, "Nessuna anteprima Vespera per questo oggetto", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                paths.add(preview);
+            } else if (fits) {
+                if (selected.fitsCount() == 0) {
+                    Toast.makeText(this, "Nessun FITS per questo oggetto", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                paths.addAll(selected.fitsPaths);
+            } else if (selected.imagePaths.isEmpty()) {
+                Toast.makeText(this, "Nessun JPEG per questo oggetto", Toast.LENGTH_SHORT).show();
+                return;
+            } else {
+                paths.addAll(selected.imagePaths);
+            }
             scientific = selected.scientificName;
             pub = selected.publicName;
             kind = selected.kindLabel();
         } else {
-            if (pickedPaths.isEmpty()) {
-                Toast.makeText(this, "Seleziona almeno un'immagine", Toast.LENGTH_SHORT).show();
+            for (String path : pickedPaths) {
+                if (fits) {
+                    if (FtpBrowser.isFitsName(path)) paths.add(path);
+                } else if (FtpBrowser.isImageName(path)) {
+                    paths.add(path);
+                }
+            }
+            if (live) {
+                List<String> preview = FrameSelect.forPreview(paths);
+                paths.clear();
+                paths.addAll(preview);
+            }
+            if (paths.isEmpty()) {
+                Toast.makeText(this,
+                        live ? "Seleziona un JPEG (meglio un *-output.jpg)"
+                                : (fits ? "Seleziona i file FITS" : "Seleziona i JPEG"),
+                        Toast.LENGTH_SHORT).show();
                 return;
             }
-            paths.addAll(pickedPaths);
         }
         Intent intent = new Intent(this, StackWorkActivity.class);
         intent.putExtra(EXTRA_HOST, sessionHost);
@@ -647,18 +762,31 @@ public final class MainActivity extends Activity {
     }
 
     private void updateStartEnabled() {
-        boolean ok = connected && (objectsTab
-                ? selected != null && selected.frameCount() > 0
-                : !pickedPaths.isEmpty());
-        liveBtn.setEnabled(ok);
-        shareBtn.setEnabled(ok);
-        liveBtn.setAlpha(ok ? 1f : 0.45f);
-        shareBtn.setAlpha(ok ? 1f : 0.45f);
+        boolean fits = store.getShareOptions().useFits;
+        boolean jpeg = false;
+        boolean hasFits = false;
+        if (!objectsTab) {
+            for (String path : pickedPaths) {
+                if (FtpBrowser.isFitsName(path)) hasFits = true;
+                else if (FtpBrowser.isImageName(path)) jpeg = true;
+            }
+        }
+        boolean objectReady = selected != null && selected.detailsReady;
+        boolean liveOk = connected && (objectsTab
+                ? objectReady && !selected.lastPreviewPath().isEmpty()
+                : jpeg);
+        boolean shareOk = connected && (objectsTab
+                ? objectReady && (fits ? selected.fitsCount() > 0 : selected.frameCount() > 0)
+                : (fits ? hasFits : jpeg));
+        liveBtn.setEnabled(liveOk);
+        shareBtn.setEnabled(shareOk);
+        liveBtn.setAlpha(liveOk ? 1f : 0.45f);
+        shareBtn.setAlpha(shareOk ? 1f : 0.45f);
     }
 
     private void setStatus(String text, boolean error) {
         statusView.setText(text);
-        statusView.setTextColor(error ? DANGER : MUTED);
+        statusView.setTextColor(error ? DANGER : TEXT);
     }
 
     private Button filterButton(String text, SkyObject.Kind kind) {

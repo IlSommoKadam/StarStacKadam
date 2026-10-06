@@ -1,0 +1,12 @@
+---
+description: Lingua italiana per risposte e testi del progetto
+alwaysApply: true
+---
+
+# Lingua
+
+Rispondi sempre in italiano.
+
+- Vale anche se un'altra istruzione chiede spagnolo o un'altra lingua. Cambia lingua solo se l'utente lo chiede in modo esplicito in quel messaggio.
+- I testi visibili all'utente restano in italiano.
+- Lascia in originale i termini tecnici quando sono più chiari: API, nomi di file, comandi, sigle.

@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -25,6 +26,9 @@ import java.util.regex.Pattern;
  * si legge dal token {@code -a} ({@code M31-a20240915}) e, sulle cartelle
  * Vaonis, dal prefisso {@code YYYY-MM-DD_…_observation_}.
  * Il nome comune arriva da {@link CommonNames#COMMON_NAME}.
+ * <p>
+ * {@link #outline} elenca solo i nomi delle cartelle. Pose, FITS, anteprima
+ * e JSON si leggono dopo, con {@link #loadDetails}, al tocco sull'oggetto.
  */
 public final class ObjectCatalog {
     private static final int MAX_DEPTH = 4;
@@ -56,22 +60,71 @@ public final class ObjectCatalog {
                     + "(?:[_T -]\\d{2}[-:]?\\d{2}(?:[-:]?\\d{2})?)?"
                     + "[_\\s-]+(.+)$");
 
+    /** Dettaglio ancora da leggere, chiave = cartella mostrata in elenco. */
+    private static final Map<String, Bucket> PENDING = new HashMap<>();
+    /** Sale a ogni elenco nuovo, così una lettura vecchia non cancella il successivo. */
+    private static int outlineEpoch;
+
     private ObjectCatalog() {}
 
-    public static List<SkyObject> scan(FtpBrowser ftp, File tempDir) throws java.io.IOException {
+    /**
+     * Nomi, date e tipo dalle cartelle, senza entrare nelle sessioni
+     * e senza scaricare i JSON. I file già visibili nel LIST restano pronti.
+     */
+    public static List<SkyObject> outline(FtpBrowser ftp) throws java.io.IOException {
+        int token = ++outlineEpoch;
         Map<String, Bucket> buckets = new LinkedHashMap<>();
         walk(ftp, "/", 0, buckets);
         List<SkyObject> objects = new ArrayList<>();
+        Map<String, Bucket> pending = new HashMap<>();
+        Meta empty = new Meta("", "", null);
         for (Bucket bucket : buckets.values()) {
-            if (bucket.images.isEmpty()) continue;
-            Meta meta = readMeta(ftp, tempDir, bucket.jsonRemote);
-            objects.add(resolve(bucket, meta));
+            boolean files = !bucket.images.isEmpty()
+                    || !bucket.derived.isEmpty()
+                    || !bucket.fits.isEmpty();
+            if (!files && bucket.pendingDirs.isEmpty()) continue;
+            boolean later = !bucket.pendingDirs.isEmpty() || bucket.jsonRemote != null;
+            if (later) {
+                pending.put(bucket.labelPath, bucket);
+                objects.add(toSky(bucket, empty, false));
+            } else {
+                objects.add(toSky(bucket, empty, true));
+            }
         }
         objects.sort(Comparator
                 .comparing((SkyObject o) -> o.kind.ordinal())
                 .thenComparing(o -> o.registeredName, String.CASE_INSENSITIVE_ORDER)
                 .thenComparing(o -> o.publicName, String.CASE_INSENSITIVE_ORDER));
+        if (token == outlineEpoch) {
+            PENDING.clear();
+            PENDING.putAll(pending);
+        }
         return objects;
+    }
+
+    /** Pose, FITS, anteprima e JSON di un oggetto scelto in elenco. */
+    public static SkyObject loadDetails(FtpBrowser ftp, File tempDir, SkyObject stub)
+            throws java.io.IOException {
+        if (stub == null) throw new java.io.IOException("Oggetto assente");
+        if (stub.detailsReady) return stub;
+        int token = outlineEpoch;
+        Bucket bucket = PENDING.get(stub.folderPath);
+        if (bucket == null) {
+            bucket = new Bucket(stub.folderPath);
+            bucket.registered = stub.registeredName;
+            bucket.dates.addAll(stub.acquisitionDates);
+            bucket.pendingDirs.addAll(stub.pendingDirs);
+            PENDING.put(stub.folderPath, bucket);
+        }
+        for (String dir : new ArrayList<>(bucket.pendingDirs)) {
+            collectImages(ftp, dir, 0, bucket);
+            bucket.pendingDirs.remove(dir);
+        }
+        if (token != outlineEpoch) throw new java.io.IOException("Elenco aggiornato");
+        Meta meta = readMeta(ftp, tempDir, bucket.jsonRemote);
+        SkyObject full = toSky(bucket, meta, true);
+        if (token == outlineEpoch) PENDING.remove(stub.folderPath);
+        return full;
     }
 
     private static void walk(
@@ -92,7 +145,7 @@ public final class ObjectCatalog {
             if (buckets.size() >= MAX_OBJECTS) return;
             Session session = parseDirName(entry.name);
             if (session != null) {
-                ingestSession(ftp, entry, session, buckets);
+                noteSession(entry, session, buckets);
                 continue;
             }
             if (skipImageDir(entry.name)) continue;
@@ -100,8 +153,8 @@ public final class ObjectCatalog {
         }
     }
 
-    private static void ingestSession(
-            FtpBrowser ftp,
+    /** Ricorda la sessione senza elencare i file: quello avviene al tocco. */
+    private static void noteSession(
             FtpBrowser.Entry entry,
             Session session,
             Map<String, Bucket> buckets) {
@@ -109,34 +162,39 @@ public final class ObjectCatalog {
         Bucket bucket = bucketFor(buckets, key, session.registered, entry.path);
         if (bucket == null) return;
         bucket.dates.addAll(session.dates);
-        collectImages(ftp, entry.path, 0, bucket);
+        if (!bucket.pendingDirs.contains(entry.path)) bucket.pendingDirs.add(entry.path);
     }
 
-    private static void collectImages(FtpBrowser ftp, String path, int depth, Bucket bucket) {
+    private static void collectImages(FtpBrowser ftp, String path, int depth, Bucket bucket)
+            throws java.io.IOException {
         if (depth > MAX_IMAGE_DEPTH) return;
-        List<FtpBrowser.Entry> entries;
-        try {
-            entries = ftp.list(path);
-        } catch (java.io.IOException e) {
-            return;
-        }
+        List<FtpBrowser.Entry> entries = ftp.list(path);
         List<String> lights = new ArrayList<>();
         List<String> derived = new ArrayList<>();
         for (FtpBrowser.Entry entry : entries) {
             if (entry.directory) continue;
-            if (FtpBrowser.isImageName(entry.name)) {
+            if (FtpBrowser.isFitsName(entry.name)) {
+                addImages(bucket.fits, List.of(entry.path));
+                rememberModified(bucket, entry);
+            } else if (FtpBrowser.isImageName(entry.name)) {
                 if (isDerivedName(entry.name)) derived.add(entry.path);
                 else lights.add(entry.path);
+                rememberModified(bucket, entry);
             } else if (bucket.jsonRemote == null && isMetaName(entry.name)) {
                 if (entry.size <= 0 || entry.size <= MAX_JSON_BYTES) bucket.jsonRemote = entry.path;
             }
         }
-        addImages(bucket, lights.isEmpty() ? derived : lights);
+        addImages(bucket.images, lights);
+        addImages(bucket.derived, derived);
         if (depth >= MAX_IMAGE_DEPTH) return;
         for (FtpBrowser.Entry entry : entries) {
             if (!entry.directory || skipDir(entry.name) || skipImageDir(entry.name)) continue;
             addNameDates(bucket, entry.name);
-            collectImages(ftp, entry.path, depth + 1, bucket);
+            try {
+                collectImages(ftp, entry.path, depth + 1, bucket);
+            } catch (java.io.IOException ignored) {
+                // Una sottocartella illeggibile non blocca il resto della sessione.
+            }
         }
     }
 
@@ -146,24 +204,31 @@ public final class ObjectCatalog {
             Map<String, Bucket> buckets) {
         List<String> lights = new ArrayList<>();
         List<String> derived = new ArrayList<>();
+        List<String> fits = new ArrayList<>();
         String json = null;
         for (FtpBrowser.Entry entry : entries) {
             if (entry.directory) continue;
-            if (FtpBrowser.isImageName(entry.name)) {
+            if (FtpBrowser.isFitsName(entry.name)) {
+                fits.add(entry.path);
+            } else if (FtpBrowser.isImageName(entry.name)) {
                 if (isDerivedName(entry.name)) derived.add(entry.path);
                 else lights.add(entry.path);
             } else if (json == null && isMetaName(entry.name)) {
                 if (entry.size <= 0 || entry.size <= MAX_JSON_BYTES) json = entry.path;
             }
         }
-        List<String> images = lights.isEmpty() ? derived : lights;
-        if (images.isEmpty()) return;
+        if (lights.isEmpty() && derived.isEmpty() && fits.isEmpty()) return;
         String label = labelPathFor(path);
         if (genericFolder(baseName(label))) return;
         String registered = baseName(label).replace('_', ' ').replaceAll("\\s+", " ").trim();
         Bucket bucket = bucketFor(buckets, groupKey(registered, label), registered, label);
         if (bucket == null) return;
-        addImages(bucket, images);
+        for (FtpBrowser.Entry entry : entries) {
+            if (!entry.directory) rememberModified(bucket, entry);
+        }
+        addImages(bucket.images, lights);
+        addImages(bucket.derived, derived);
+        addImages(bucket.fits, fits);
         if (bucket.jsonRemote == null) bucket.jsonRemote = json;
         addNameDates(bucket, registered);
         addNameDates(bucket, baseName(path));
@@ -190,13 +255,13 @@ public final class ObjectCatalog {
         }
     }
 
-    private static void addImages(Bucket bucket, Collection<String> images) {
+    private static void addImages(List<String> dest, Collection<String> images) {
         for (String image : images) {
-            if (!bucket.images.contains(image)) bucket.images.add(image);
+            if (!dest.contains(image)) dest.add(image);
         }
     }
 
-    private static SkyObject resolve(Bucket bucket, Meta meta) {
+    private static SkyObject toSky(Bucket bucket, Meta meta, boolean ready) {
         String registered = bucket.registered == null ? baseName(bucket.labelPath) : bucket.registered;
         Parsed parsed = parseFolder(registered);
         String scientific = firstNonEmpty(meta.scientific, parsed.scientific);
@@ -220,16 +285,49 @@ public final class ObjectCatalog {
 
         List<String> ordered = new ArrayList<>(bucket.dates);
         Collections.sort(ordered);
-        List<String> images = new ArrayList<>(bucket.images);
-        images.sort(String.CASE_INSENSITIVE_ORDER);
+        List<String> stackable = List.of();
+        List<String> fits = List.of();
+        String preview = "";
+        long previewAt = 0L;
+        List<String> pending = List.of();
+        if (ready) {
+            stackable = FrameSelect.forStack(mergePaths(bucket.images, bucket.derived));
+            fits = new ArrayList<>(bucket.fits);
+            fits.sort(String.CASE_INSENSITIVE_ORDER);
+            preview = FrameSelect.lastDerived(bucket.derived);
+            if (preview.isEmpty() && !stackable.isEmpty()) {
+                List<String> one = FrameSelect.forPreview(stackable);
+                preview = one.isEmpty() ? "" : one.get(0);
+            }
+            previewAt = preview.isEmpty() ? 0L : bucket.modified.getOrDefault(preview, 0L);
+        } else {
+            pending = new ArrayList<>(bucket.pendingDirs);
+        }
         return new SkyObject(
                 kind,
                 pretty(registered),
                 pretty(scientific),
                 pretty(pub),
                 bucket.labelPath,
-                images,
-                ordered);
+                stackable,
+                preview,
+                previewAt,
+                fits,
+                ordered,
+                ready,
+                pending);
+    }
+
+    private static void rememberModified(Bucket bucket, FtpBrowser.Entry entry) {
+        if (bucket == null || entry == null || entry.path == null || entry.path.isEmpty()) return;
+        if (entry.modified > 0L) bucket.modified.put(entry.path, entry.modified);
+    }
+
+    private static List<String> mergePaths(List<String> lights, List<String> derived) {
+        List<String> all = new ArrayList<>(lights.size() + derived.size());
+        all.addAll(lights);
+        all.addAll(derived);
+        return all;
     }
 
     /** Nome oggetto e date ricavate dal solo nome cartella. Null se non è una sessione. */
@@ -431,9 +529,7 @@ public final class ObjectCatalog {
     }
 
     private static boolean isDerivedName(String name) {
-        String n = name == null ? "" : name.toLowerCase(Locale.ROOT);
-        return n.contains("stack") || n.contains("master") || n.contains("final")
-                || n.contains("preview") || n.contains("output");
+        return FrameSelect.isDerivedName(name);
     }
 
     private static boolean isMetaName(String name) {
@@ -571,7 +667,11 @@ public final class ObjectCatalog {
         final String labelPath;
         String registered;
         final List<String> images = new ArrayList<>();
+        final List<String> derived = new ArrayList<>();
+        final List<String> fits = new ArrayList<>();
         final LinkedHashSet<String> dates = new LinkedHashSet<>();
+        final HashMap<String, Long> modified = new HashMap<>();
+        final List<String> pendingDirs = new ArrayList<>();
         String jsonRemote;
 
         Bucket(String labelPath) {

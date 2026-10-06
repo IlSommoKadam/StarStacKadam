@@ -155,7 +155,7 @@ public final class FtpBrowser implements AutoCloseable {
         return sortEntries(out);
     }
 
-    /** LIST illeggibile: NLST dà i nomi, il tipo si prova con CWD. */
+    /** LIST illeggibile: NLST dà i nomi. Il tipo si deduce dall'estensione, senza un CWD a nome. */
     private List<Entry> entriesFromNames(String cwd, String[] names) throws IOException {
         List<Entry> out = new ArrayList<>();
         for (String raw : names) {
@@ -168,19 +168,21 @@ public final class FtpBrowser implements AutoCloseable {
             if (slash >= 0) name = name.substring(slash + 1);
             if (name.isEmpty() || ".".equals(name) || "..".equals(name)) continue;
             String child = joinPath(cwd, name);
-            boolean directory = markedDir || isDirectoryPath(cwd, child, name);
-            out.add(new Entry(name, child, directory, 0L, 0L));
+            out.add(new Entry(name, child, markedDir || looksLikeDirectory(name), 0L, 0L));
         }
         return sortEntries(out);
     }
 
-    private boolean isDirectoryPath(String cwd, String child, String name) throws IOException {
-        if (isImageName(name) || isFitsName(name)) return false;
-        String lower = name.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(".json") || lower.endsWith(".txt") || lower.endsWith(".csv")) return false;
-        boolean directory = ftp.changeWorkingDirectory(child);
-        if (directory) ftp.changeWorkingDirectory(cwd);
-        return directory;
+    /** Estensione corta: file. Il resto, senza un CWD per nome, è una cartella. */
+    private static boolean looksLikeDirectory(String name) {
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0 || dot >= name.length() - 1) return true;
+        String ext = name.substring(dot + 1);
+        if (ext.length() > 4) return true;
+        for (int i = 0; i < ext.length(); i++) {
+            if (!Character.isLetterOrDigit(ext.charAt(i))) return true;
+        }
+        return false;
     }
 
     private static List<Entry> sortEntries(List<Entry> out) {
@@ -235,6 +237,27 @@ public final class FtpBrowser implements AutoCloseable {
     private static String oneLine(String reply) {
         if (reply == null) return "";
         return reply.replace('\r', ' ').replace('\n', ' ').trim();
+    }
+
+    /**
+     * Ultima modifica remota via MDTM (canale di controllo, senza download).
+     * @return epoch millis, oppure 0 se il server non la espone
+     */
+    public long modifiedMillis(String remotePath) throws IOException {
+        ensureConnected();
+        if (remotePath == null || remotePath.isEmpty()) return 0L;
+        String raw = ftp.getModificationTime(remotePath);
+        if (raw == null || raw.isBlank()) return 0L;
+        String digits = raw.trim().replaceAll("[^0-9]", "");
+        if (digits.length() < 14) return 0L;
+        try {
+            java.time.LocalDateTime ldt = java.time.LocalDateTime.parse(
+                    digits.substring(0, 14),
+                    java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss"));
+            return ldt.toInstant(java.time.ZoneOffset.UTC).toEpochMilli();
+        } catch (RuntimeException ignored) {
+            return 0L;
+        }
     }
 
     public void retr(String remotePath, File dest) throws IOException {

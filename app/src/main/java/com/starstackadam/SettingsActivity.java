@@ -63,6 +63,7 @@ public final class SettingsActivity extends Activity {
     private Picker shareVotes;
     private CheckBox shareReject;
     private CheckBox shareBg;
+    private CheckBox shareFits;
     private TextView shareSummary;
     private Button shareFastBtn;
     private Button shareQualityBtn;
@@ -135,7 +136,8 @@ public final class SettingsActivity extends Activity {
 
         body.addView(section("Aggiornamenti"));
         body.addView(hint("Versione installata: " + AppVersion.name(this)
-                + ". Il controllo parte all'avvio dell'app, oppure quando premi Controlla aggiornamenti."));
+                + ". Il controllo parte all'avvio. Se l'app resta aperta, si ripete quando torna visibile "
+                + "e sono passate almeno 24 ore. Puoi sempre premere Controlla aggiornamenti."));
         body.addView(fieldLabel("Link della cartella aggiornamenti"));
         megaLink = field("https://mega.nz/folder/…", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         megaLink.setText(AppUpdates.versionUrl(this));
@@ -156,10 +158,10 @@ public final class SettingsActivity extends Activity {
         });
         body.addView(checkBtn, bottomLp(8));
 
-        body.addView(section("Visione live — prestazioni"));
+        body.addView(section("Anteprima Vespera"));
         body.addView(hint(
-                "Anteprima veloce. Un lato più corto e meno stelle arrivano prima. "
-                        + "Di solito le pose deboli restano nello stack."));
+                "Mostra l'ultimo stack del telescopio (*-output.jpg), senza rimediarlo. "
+                        + "Il lato lungo vale solo per il ridimensionamento a schermo."));
         LinearLayout livePresets = new LinearLayout(this);
         livePresets.setOrientation(LinearLayout.HORIZONTAL);
         livePerfBtn = presetButton("Prestazioni");
@@ -222,8 +224,13 @@ public final class SettingsActivity extends Activity {
         body.addView(shareVotes.view);
         shareReject = check("Escludi le pose sotto soglia");
         shareBg = check("Sottrai il fondo all'avvio");
+        shareFits = check("FITS (opzione avanzata)");
         body.addView(shareReject);
         body.addView(shareBg);
+        body.addView(shareFits);
+        body.addView(hint(
+                "Solo lo stack condivisibile. I FITS pesano di più da scaricare; "
+                        + "il lato lungo resta quello scelto sopra, il live resta sui JPEG."));
         shareSummary = hint("");
         shareSummary.setTextColor(SHARE);
         body.addView(shareSummary);
@@ -253,6 +260,7 @@ public final class SettingsActivity extends Activity {
         timeoutPicker.select(store.getFtpTimeoutSec());
         applyLive(store.getLiveOptions());
         applyShare(store.getShareOptions());
+        shareFits.setChecked(store.getShareOptions().useFits);
     }
 
     private void applyDefaults() {
@@ -261,6 +269,7 @@ public final class SettingsActivity extends Activity {
         timeoutPicker.select(12);
         applyLive(HostSettingsStore.StackOptions.liveBalanced());
         applyShare(HostSettingsStore.StackOptions.shareQuality());
+        shareFits.setChecked(false);
         probeEndpoints();
         Toast.makeText(this, "Modulo riportato ai predefiniti. Premi Salva per tenerli.", Toast.LENGTH_SHORT).show();
     }
@@ -312,7 +321,8 @@ public final class SettingsActivity extends Activity {
                 shareStars.selected,
                 shareVotes.selected,
                 shareReject.isChecked(),
-                shareBg.isChecked());
+                shareBg.isChecked(),
+                shareFits != null && shareFits.isChecked());
     }
 
     private void saveAndClose() {
@@ -498,6 +508,7 @@ public final class SettingsActivity extends Activity {
         CheckBox box = new CheckBox(this);
         box.setText(text);
         box.setTextColor(TEXT);
+        BlueCheck.apply(box);
         box.setOnCheckedChangeListener((button, checked) -> refreshSummaries());
         return box;
     }

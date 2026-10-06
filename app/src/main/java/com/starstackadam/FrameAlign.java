@@ -6,8 +6,8 @@ import java.util.List;
 
 /**
  * Allinea un frame al riferimento con una rotazione piccola intorno al centro
- * e una traslazione. Il voto è l'istogramma degli spostamenti fra le stelle:
- * le coppie vere cadono nello stesso bin, le coppie false si spargono.
+ * e una traslazione. Istogramma grezzo per il picco, poi raffinamento a coppie
+ * esclusive così i voti contano stelle vere e non doppioni.
  */
 public final class FrameAlign {
     public static final class Transform {
@@ -15,34 +15,45 @@ public final class FrameAlign {
         public final float dx;
         public final float dy;
         public final int votes;
+        /** Scarto quadratico medio delle stelle abbinate, in pixel. */
+        public final float rms;
 
         public Transform(float angleDeg, float dx, float dy, int votes) {
+            this(angleDeg, dx, dy, votes, 0f);
+        }
+
+        public Transform(float angleDeg, float dx, float dy, int votes, float rms) {
             this.angleDeg = angleDeg;
             this.dx = dx;
             this.dy = dy;
             this.votes = votes;
+            this.rms = rms;
         }
 
         public static Transform identity() {
-            return new Transform(0f, 0f, 0f, 0);
+            return new Transform(0f, 0f, 0f, 0, 0f);
         }
     }
 
+    /** Sopra questa soglia il match ha troppe stelle ma è impreciso: scie. */
+    public static final float MAX_RMS_PX = 1.15f;
+
     private static final float[] ANGLES = {
             0f, -0.5f, 0.5f, -1f, 1f, -1.5f, 1.5f, -2f, 2f,
-            -3f, 3f, -4f, 4f, -6f, 6f, -8f, 8f
+            -3f, 3f, -4f, 4f, -5f, 5f, -6f, 6f, -8f, 8f,
+            -10f, 10f, -12f, 12f, -15f, 15f
     };
 
     private FrameAlign() {}
 
     public static Transform match(List<StarFinder.Star> reference, List<StarFinder.Star> moving,
                                   int width, int height) {
-        int nRef = Math.min(reference.size(), 30);
-        int nMov = Math.min(moving.size(), 30);
+        int nRef = Math.min(reference.size(), 40);
+        int nMov = Math.min(moving.size(), 40);
         if (nRef < 4 || nMov < 4) return Transform.identity();
         float cx = width * 0.5f;
         float cy = height * 0.5f;
-        int win = Math.max(32, Math.min(width, height) / 3);
+        int win = Math.max(48, Math.min(width, height) / 2);
         int bins = win * 2 + 1;
         int[] hist = new int[bins * bins];
         Transform best = Transform.identity();
@@ -51,8 +62,29 @@ public final class FrameAlign {
                     reference, nRef, moving, nMov, angle, cx, cy, win, bins, hist);
             if (candidate.votes > best.votes) best = candidate;
         }
-        if (best.votes < 4) return Transform.identity();
-        return best;
+        if (best.votes < 3) return Transform.identity();
+        return refine(reference, nRef, moving, nMov, best, cx, cy);
+    }
+
+    /**
+     * Compone {@code outer} ∘ {@code inner}: prima {@code inner} (sorgente → guida),
+     * poi {@code outer} (guida → riferimento).
+     */
+    public static Transform compose(Transform outer, Transform inner) {
+        if (outer == null) return inner == null ? Transform.identity() : inner;
+        if (inner == null) return outer;
+        float angle = outer.angleDeg + inner.angleDeg;
+        double rad = Math.toRadians(outer.angleDeg);
+        float cos = (float) Math.cos(rad);
+        float sin = (float) Math.sin(rad);
+        float dx = outer.dx + inner.dx * cos - inner.dy * sin;
+        float dy = outer.dy + inner.dx * sin + inner.dy * cos;
+        int votes = Math.min(
+                outer.votes <= 0 ? Integer.MAX_VALUE : outer.votes,
+                inner.votes <= 0 ? Integer.MAX_VALUE : inner.votes);
+        if (votes == Integer.MAX_VALUE) votes = Math.max(outer.votes, inner.votes);
+        float rms = Math.max(outer.rms, inner.rms);
+        return new Transform(angle, dx, dy, votes, rms);
     }
 
     private static Transform translationPeak(
@@ -82,7 +114,15 @@ public final class FrameAlign {
                 int ix = Math.round(dx) + win;
                 int iy = Math.round(dy) + win;
                 if (ix < 0 || iy < 0 || ix >= bins || iy >= bins) continue;
-                hist[iy * bins + ix]++;
+                for (int oy = -1; oy <= 1; oy++) {
+                    int yy = iy + oy;
+                    if (yy < 0 || yy >= bins) continue;
+                    for (int ox = -1; ox <= 1; ox++) {
+                        int xx = ix + ox;
+                        if (xx < 0 || xx >= bins) continue;
+                        hist[yy * bins + xx] += (ox == 0 && oy == 0) ? 3 : 1;
+                    }
+                }
             }
         }
         int peak = 0;
@@ -100,27 +140,114 @@ public final class FrameAlign {
                 second = votes;
             }
         }
-        if (peak < 4) return Transform.identity();
-        if (second > 0 && peak < 8 && peak < second * 2) return Transform.identity();
-        float dxBin = px - win;
-        float dyBin = py - win;
-        float accX = 0f;
-        float accY = 0f;
-        int acc = 0;
-        for (int i = 0; i < nRef; i++) {
-            StarFinder.Star ref = reference.get(i);
-            for (int j = 0; j < nMov; j++) {
-                float dx = ref.x - rx[j];
-                float dy = ref.y - ry[j];
-                if (Math.abs(dx - dxBin) <= 1.6f && Math.abs(dy - dyBin) <= 1.6f) {
-                    accX += dx;
-                    accY += dy;
-                    acc++;
-                }
+        int pairVotes = (peak + 2) / 3;
+        if (pairVotes < 3) return Transform.identity();
+        if (second > 0 && pairVotes < 6 && peak < second * 1.35f) return Transform.identity();
+        return new Transform(angleDeg, px - win, py - win, pairVotes);
+    }
+
+    /** Angolo fine ±0.5° e coppie 1:1 entro 1.8 px: dx/dy medi sulle stelle vere. */
+    private static Transform refine(
+            List<StarFinder.Star> reference, int nRef,
+            List<StarFinder.Star> moving, int nMov,
+            Transform coarse, float cx, float cy) {
+        Transform best = exclusivePairs(
+                reference, nRef, moving, nMov, coarse.angleDeg, coarse.dx, coarse.dy, cx, cy);
+        for (int step = -5; step <= 5; step++) {
+            if (step == 0) continue;
+            float angle = coarse.angleDeg + step * 0.1f;
+            Transform trial = exclusivePairs(
+                    reference, nRef, moving, nMov, angle, coarse.dx, coarse.dy, cx, cy);
+            if (trial.votes > best.votes
+                    || (trial.votes == best.votes && residual(trial) < residual(best))) {
+                best = trial;
             }
         }
-        if (acc == 0) return new Transform(angleDeg, dxBin, dyBin, peak);
-        return new Transform(angleDeg, accX / acc, accY / acc, peak);
+        if (best.votes < 3) return Transform.identity();
+        return best;
+    }
+
+    private static float residual(Transform t) {
+        return Math.abs(t.dx) + Math.abs(t.dy) + Math.abs(t.angleDeg) * 0.01f;
+    }
+
+    private static Transform exclusivePairs(
+            List<StarFinder.Star> reference, int nRef,
+            List<StarFinder.Star> moving, int nMov,
+            float angleDeg, float seedDx, float seedDy, float cx, float cy) {
+        double rad = Math.toRadians(angleDeg);
+        float cos = (float) Math.cos(rad);
+        float sin = (float) Math.sin(rad);
+        float[] mx = new float[nMov];
+        float[] my = new float[nMov];
+        for (int j = 0; j < nMov; j++) {
+            StarFinder.Star star = moving.get(j);
+            float x = star.x - cx;
+            float y = star.y - cy;
+            mx[j] = x * cos - y * sin + cx + seedDx;
+            my[j] = x * sin + y * cos + cy + seedDy;
+        }
+        boolean[] used = new boolean[nMov];
+        float accX = 0f;
+        float accY = 0f;
+        int pairs = 0;
+        final float maxDist2 = 1.8f * 1.8f;
+        for (int i = 0; i < nRef; i++) {
+            StarFinder.Star ref = reference.get(i);
+            int bestJ = -1;
+            float bestD2 = maxDist2;
+            for (int j = 0; j < nMov; j++) {
+                if (used[j]) continue;
+                float dx = ref.x - mx[j];
+                float dy = ref.y - my[j];
+                float d2 = dx * dx + dy * dy;
+                if (d2 < bestD2) {
+                    bestD2 = d2;
+                    bestJ = j;
+                }
+            }
+            if (bestJ < 0) continue;
+            used[bestJ] = true;
+            // Spostamento rispetto alla sola rotazione (senza seed), per il valore assoluto.
+            float x = moving.get(bestJ).x - cx;
+            float y = moving.get(bestJ).y - cy;
+            float rx = x * cos - y * sin + cx;
+            float ry = x * sin + y * cos + cy;
+            accX += ref.x - rx;
+            accY += ref.y - ry;
+            pairs++;
+        }
+        if (pairs < 3) return new Transform(angleDeg, seedDx, seedDy, 0, 99f);
+        float dx = accX / pairs;
+        float dy = accY / pairs;
+        float sum2 = 0f;
+        int rmsN = 0;
+        java.util.Arrays.fill(used, false);
+        for (int i = 0; i < nRef; i++) {
+            StarFinder.Star ref = reference.get(i);
+            int bestJ = -1;
+            float bestD2 = maxDist2;
+            for (int j = 0; j < nMov; j++) {
+                if (used[j]) continue;
+                float x = moving.get(j).x - cx;
+                float y = moving.get(j).y - cy;
+                float rx = x * cos - y * sin + cx + dx;
+                float ry = x * sin + y * cos + cy + dy;
+                float ex = ref.x - rx;
+                float ey = ref.y - ry;
+                float d2 = ex * ex + ey * ey;
+                if (d2 < bestD2) {
+                    bestD2 = d2;
+                    bestJ = j;
+                }
+            }
+            if (bestJ < 0) continue;
+            used[bestJ] = true;
+            sum2 += bestD2;
+            rmsN++;
+        }
+        float rms = rmsN > 0 ? (float) Math.sqrt(sum2 / rmsN) : 99f;
+        return new Transform(angleDeg, dx, dy, pairs, rms);
     }
 
     /** Ricampiona {@code src} nel sistema del riferimento. */

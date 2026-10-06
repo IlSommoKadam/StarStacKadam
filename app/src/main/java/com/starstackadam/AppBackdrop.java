@@ -27,7 +27,7 @@ final class AppBackdrop {
         image.setScaleType(ImageView.ScaleType.CENTER_CROP);
         image.setImageResource(R.drawable.bg_nebulosa);
         ColorMatrix lift = new ColorMatrix();
-        lift.setScale(1.25f, 1.25f, 1.25f, 1f);
+        lift.setScale(1.05f, 1.05f, 1.05f, 1f);
         image.setColorFilter(new ColorMatrixColorFilter(lift));
         image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         FrameLayout.LayoutParams match = matchParent();
@@ -36,7 +36,7 @@ final class AppBackdrop {
         View scrim = new View(context);
         GradientDrawable shade = new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x22101828, 0x55101828});
+                new int[]{0x99101828, 0x66101828, 0x99101828});
         scrim.setBackground(shade);
         scrim.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         frame.addView(scrim, matchParent());

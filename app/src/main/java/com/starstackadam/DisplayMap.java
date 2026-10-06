@@ -1,11 +1,10 @@
 package com.starstackadam;
 
 /**
- * Porta il frame lineare sullo schermo.
- * Autostretch: nero dalla mediana e dallo scarto MAD, poi funzione midtone
- * così il cielo resta scuro e l'oggetto compare, come nella visualizzazione
- * di uno stack lineare.
- * Livelli: nero, gamma e bianco, lo stesso controllo di un regolatore di livelli.
+ * Porta il frame sullo schermo.
+ * Autostretch: stima nero/bianco/gamma come i livelli a mano, senza MTF
+ * aggressivo che tira su il rumore JPEG.
+ * Livelli: nero, gamma e bianco scelti dall'utente.
  */
 public final class DisplayMap {
     public static final class Render {
@@ -30,25 +29,17 @@ public final class DisplayMap {
             int p = i * 3;
             bag[n++] = Stats.luma(src.rgb[p], src.rgb[p + 1], src.rgb[p + 2]);
         }
+        if (n < 8) return levels(src, 0f, 1f, 1f);
+
         float median = Stats.median(bag, n);
         float sigma = 1.4826f * Stats.mad(bag, n, median);
-        float black = median - 2.8f * sigma;
-        if (black > 0.9f) black = 0.9f;
-        float denom = 1f - black;
-        if (denom < 0.05f) denom = 0.05f;
-        float xmed = clamp((median - black) / denom, 0.002f, 0.98f);
-        float midtone = clamp(midtoneFor(xmed, 0.22f), 0.05f, 0.95f);
-        int[] argb = new int[pixels];
-        int[] hist = new int[256];
-        for (int i = 0; i < pixels; i++) {
-            int p = i * 3;
-            float r = mtf(clamp((src.rgb[p] - black) / denom, 0f, 1f), midtone);
-            float g = mtf(clamp((src.rgb[p + 1] - black) / denom, 0f, 1f), midtone);
-            float b = mtf(clamp((src.rgb[p + 2] - black) / denom, 0f, 1f), midtone);
-            argb[i] = pack(r, g, b);
-            hist[lumaByte(r, g, b)]++;
-        }
-        return new Render(argb, hist);
+        // Nero appena sopra il cielo: le fluttuazioni JPEG restano sotto soglia.
+        float black = median + 0.35f * Math.max(sigma, 0.002f);
+        float white = Stats.percentile(bag, n, 0.998f);
+        if (white < black + 0.04f) white = Math.min(1f, black + 0.04f);
+        // Gamma < 1 schiarisce un po' la nebulosa senza aprire il fondo.
+        float gamma = 0.88f;
+        return levels(src, black, white, gamma);
     }
 
     public static Render levels(ImagePlane src, float black, float white, float gamma) {
@@ -60,6 +51,11 @@ public final class DisplayMap {
         int[] argb = new int[pixels];
         int[] hist = new int[256];
         for (int i = 0; i < pixels; i++) {
+            if (src.cover != null && src.cover[i] == 0) {
+                argb[i] = 0xFF000000;
+                hist[0]++;
+                continue;
+            }
             int p = i * 3;
             float r = tone(src.rgb[p], black, denom, exp);
             float g = tone(src.rgb[p + 1], black, denom, exp);

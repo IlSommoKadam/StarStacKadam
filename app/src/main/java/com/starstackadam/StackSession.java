@@ -6,9 +6,8 @@ import java.util.List;
 
 /**
  * Due modalità, con i parametri letti da Impostazioni.
- * Live (prestazioni): MEAN streaming, lato più corto, le pose deboli restano.
- * Condivisibile (qualità): lato più lungo, le pose sotto soglia si escludono;
- * il PNG + scheda JSON si salva a fine lavoro.
+ * Live: anteprima dell'ultimo stack Vespera ({@code *-output.jpg}), senza rimediarlo.
+ * Condivisibile: pose singole (o FITS), allineamento + media; PNG + scheda JSON a fine lavoro.
  * Median/Sigma restano nel motore ma non qui: tengono tutti i frame in RAM.
  */
 public final class StackSession {
@@ -150,9 +149,18 @@ public final class StackSession {
         final int minVotes = opt.minVotes;
         final String objectLabel = objectLabel(request);
 
-        int total = request.remotePaths.size();
+        List<String> paths = share
+                ? FrameSelect.forStack(request.remotePaths)
+                : FrameSelect.forPreview(request.remotePaths);
+        String selectNote = FrameSelect.note(request.remotePaths, paths);
+        int total = paths.size();
         if (total == 0) {
             listener.onProgress(StackProgress.failed(0, 0, 0, "Nessuna posa nell'oggetto"));
+            return;
+        }
+
+        if (!share) {
+            runVesperaPreview(request, listener, paths.get(0), maxEdge, objectLabel);
             return;
         }
 
@@ -164,16 +172,19 @@ public final class StackSession {
         int unaligned = 0;
         int lastVotes = 0;
         FtpBrowser ftp = null;
-
         try {
+            if (!selectNote.isEmpty()) {
+                listener.onProgress(StackProgress.running(
+                        0, total, 0, 0, selectNote, null, 0, 0, null));
+            }
             for (int i = 0; i < total; i++) {
                 if (cancelRequested) {
                     listener.onProgress(StackProgress.cancelled(i, total, unaligned));
                     return;
                 }
 
-                String remote = request.remotePaths.get(i);
-                File local = resolveLocal(request, i, remote);
+                String remote = paths.get(i);
+                File local = resolveLocal(request, remote);
                 if (!cache.hasValid(local)) {
                     if (ftp == null) {
                         ftp = new FtpBrowser();
@@ -212,19 +223,21 @@ public final class StackSession {
                         plane = plane.resample(width, height);
                     }
                     List<StarFinder.Star> stars = StarFinder.find(plane, maxStars);
+                    // Allinea allo stack corrente (stelle più stabili del primo frame).
                     FrameAlign.Transform transform = FrameAlign.match(refStars, stars, width, height);
                     lastVotes = transform.votes;
-                    if (transform.votes < minVotes) {
+                    if (transform.votes < minVotes || transform.rms > FrameAlign.MAX_RMS_PX) {
                         unaligned++;
-                        if (opt.rejectUnaligned) {
-                            String skip = "Esclusa " + baseName(remote) + " (non allineata)";
-                            if (!objectLabel.isEmpty()) skip = objectLabel + " — " + skip;
-                            listener.onProgress(StackProgress.running(
-                                    i + 1, total, lastVotes, unaligned, skip,
-                                    lastStacked, lastPreviewW, lastPreviewH,
-                                    lastStacked == null ? null : buildPreview(lastStacked).argb));
-                            continue;
-                        }
+                        String skip = "Esclusa " + baseName(remote)
+                                + (transform.votes < minVotes
+                                ? " (non allineata)"
+                                : String.format(java.util.Locale.ITALY, " (rms %.1f px)", transform.rms));
+                        if (!objectLabel.isEmpty()) skip = objectLabel + " — " + skip;
+                        listener.onProgress(StackProgress.running(
+                                i + 1, total, lastVotes, unaligned, skip,
+                                lastStacked, lastPreviewW, lastPreviewH,
+                                lastStacked == null ? null : buildPreview(lastStacked).argb));
+                        continue;
                     }
                     ImagePlane warped = FrameAlign.warp(plane, transform);
                     StackCombine.accumulate(sum, count, warped);
@@ -234,15 +247,20 @@ public final class StackSession {
                 lastStacked = mean;
                 lastPreviewW = mean.width;
                 lastPreviewH = mean.height;
+                // Aggiorna il riferimento sulla media: SNR migliore, meno deriva.
+                if (i == 0 || (i % 3) == 0) {
+                    List<StarFinder.Star> stackedStars = StarFinder.find(mean, maxStars);
+                    if (stackedStars.size() >= 4) refStars = stackedStars;
+                }
 
-                String note = (share ? "Condivisibile " : "Live ") + (i + 1) + "/" + total;
+                String note = "Condivisibile " + (i + 1) + "/" + total;
                 if (!objectLabel.isEmpty()) note = objectLabel + " — " + note;
                 Preview preview = buildPreview(mean);
                 if (preview.fitNote != null && !preview.fitNote.isEmpty()) {
                     note = note + " — " + preview.fitNote;
                 }
                 if (unaligned > 0) {
-                    note = note + (opt.rejectUnaligned ? " — escluse: " : " — non allineate: ") + unaligned;
+                    note = note + " — escluse: " + unaligned;
                 }
                 listener.onProgress(StackProgress.running(
                         i + 1, total, lastVotes, unaligned, note,
@@ -254,18 +272,17 @@ public final class StackSession {
                 return;
             }
             Preview preview = buildPreview(lastStacked);
-            int used = opt.rejectUnaligned ? total - unaligned : total;
-            String doneNote = share
-                    ? "Stack condivisibile — " + used + " pose, lato " + maxEdge
-                    : "Visione live — " + used + " pose, lato " + maxEdge;
+            int used = total - unaligned;
+            String doneNote = "Stack condivisibile — " + used + " pose, lato " + maxEdge;
             if (!objectLabel.isEmpty()) doneNote = objectLabel + " — " + doneNote;
             if (unaligned > 0) {
-                doneNote += opt.rejectUnaligned
-                        ? " — escluse " + unaligned
-                        : " — non allineate " + unaligned;
+                doneNote += " — escluse " + unaligned;
             }
             if (preview.fitNote != null && !preview.fitNote.isEmpty()) {
                 doneNote = doneNote + " — " + preview.fitNote;
+            }
+            if (share && request.profile != null && request.profile.useFits) {
+                doneNote = doneNote + " — FITS";
             }
             listener.onProgress(StackProgress.finished(
                     total, unaligned, doneNote,
@@ -319,8 +336,85 @@ public final class StackSession {
         }
     }
 
-    private File resolveLocal(Request request, int index, String remote) {
-        if (index < request.localFiles.size()) {
+    /** Scarica e mostra un solo JPEG già stackato da Vespera. */
+    private void runVesperaPreview(
+            Request request,
+            Listener listener,
+            String remote,
+            int maxEdge,
+            String objectLabel) {
+        FtpBrowser ftp = null;
+        try {
+            File local = resolveLocal(request, remote);
+            long modified = 0L;
+            if (!cache.hasValid(local)) {
+                ftp = new FtpBrowser();
+                ftp.connect(request.host, request.port, request.ftpTimeoutSec);
+                listener.onProgress(StackProgress.running(
+                        0, 1, 0, 0,
+                        "Download " + baseName(remote) + "…",
+                        null, 0, 0, null));
+                ftp.retr(remote, local);
+                modified = peekModified(ftp, remote);
+            } else {
+                modified = peekModifiedRemote(request, remote);
+            }
+            if (cancelRequested) {
+                listener.onProgress(StackProgress.cancelled(0, 1, 0));
+                return;
+            }
+            ImagePlane plane;
+            try {
+                plane = FrameDecoder.decode(local, maxEdge).fitEdge(maxEdge);
+            } catch (Exception decodeFail) {
+                cache.invalidate(local);
+                throw decodeFail;
+            }
+            lastStacked = plane;
+            lastPreviewW = plane.width;
+            lastPreviewH = plane.height;
+            Preview preview = buildPreview(plane);
+            String note = "Stack Vespera (ultimo output) — " + baseName(remote);
+            String when = SkyObject.formatWhen(modified);
+            if (!when.isEmpty()) note = note + " — " + when;
+            if (!objectLabel.isEmpty()) note = objectLabel + " — " + note;
+            if (preview.fitNote != null && !preview.fitNote.isEmpty()) {
+                note = note + " — " + preview.fitNote;
+            }
+            listener.onProgress(StackProgress.finished(
+                    1, 0, note, plane, plane.width, plane.height, preview.argb));
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            if (msg == null || msg.isEmpty()) msg = e.getClass().getSimpleName();
+            listener.onProgress(StackProgress.failed(0, 1, 0, msg));
+        } finally {
+            if (ftp != null) ftp.close();
+        }
+    }
+
+    private static long peekModified(FtpBrowser ftp, String remote) {
+        if (ftp == null || remote == null || remote.isEmpty()) return 0L;
+        try {
+            return ftp.modifiedMillis(remote);
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    /** MDTM leggero se il JPEG è già in cache (solo canale di controllo). */
+    private static long peekModifiedRemote(Request request, String remote) {
+        if (request == null || remote == null || remote.isEmpty()) return 0L;
+        try (FtpBrowser ftp = new FtpBrowser()) {
+            ftp.connect(request.host, request.port, request.ftpTimeoutSec);
+            return ftp.modifiedMillis(remote);
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private File resolveLocal(Request request, String remote) {
+        int index = request.remotePaths.indexOf(remote);
+        if (index >= 0 && index < request.localFiles.size()) {
             String path = request.localFiles.get(index);
             if (path != null && !path.isEmpty()) {
                 File given = new File(path);

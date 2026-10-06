@@ -15,11 +15,11 @@ alwaysApply: true
 
 Appena c’è una nuova `versionName`, nello stesso intervento pubblica l’APK. Non chiudere il lavoro con la versione solo nel codice.
 
-1. `.\gradlew.bat :app:assembleDebug` — copia `StarStacKadam.apk` e `starstackadam-version.json` in `C:\WORK\ESA\Share`
-2. Con MEGAcmd già loggato, carica quei due file in `/Share/pub` (cartella pubblica `https://mega.nz/folder/HswU1QqC#862Zb92yZ0Upn1PXgW5EKA`):
+1. `.\gradlew.bat :app:assembleDebug` — copia `StarStacKadam.apk` e `starstackadam-version.json` in `C:\WORK\ESA\Share\pub\Pubblici`
+2. Con MEGAcmd già loggato, carica quei due file in `/Share/pub/Pubblici` (cartella pubblica `https://mega.nz/folder/6xgAFYqY#fvY3ii_8ytQtujuGIMATmQ`):
 
 ```bat
-"%LOCALAPPDATA%\MEGAcmd\mega-put.bat" -c "C:\WORK\ESA\Share\StarStacKadam.apk" "C:\WORK\ESA\Share\starstackadam-version.json" /Share/pub
+"%LOCALAPPDATA%\MEGAcmd\mega-put.bat" -c "C:\WORK\ESA\Share\pub\Pubblici\StarStacKadam.apk" "C:\WORK\ESA\Share\pub\Pubblici\starstackadam-version.json" /Share/pub/Pubblici
 ```
 
-Se il nome esiste già, sostituiscilo (`mega-rm` del file remoto, poi `mega-put`). Controlla con `mega-ls /Share/pub` che versione e APK siano quelli nuovi.
+Se il nome esiste già, sostituiscilo (`mega-rm` del file remoto, poi `mega-put`). Controlla con `mega-ls /Share/pub/Pubblici` che versione e APK siano quelli nuovi.

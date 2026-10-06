@@ -18,6 +18,7 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,6 +37,8 @@ public final class AppUpdates {
     private static final String KEY_APK_URL = "mega_apk_url";
     private static final String KEY_SKIP = "update_skip_version";
     private static final String KEY_LAST = "update_last_check";
+    private static final String KEY_LAST_AT = "update_last_check_at";
+    private static final long VISIBLE_CHECK_INTERVAL_MS = 24L * 60L * 60L * 1000L;
 
     private static final ExecutorService WORK = Executors.newSingleThreadExecutor();
     private static final AtomicBoolean CHECKING = new AtomicBoolean(false);
@@ -82,6 +85,15 @@ public final class AppUpdates {
     public static String lastCheck(Context context) {
         String line = prefs(context).getString(KEY_LAST, "");
         return line == null || line.isBlank() ? "Nessun controllo ancora" : line;
+    }
+
+    /** Come ESA Meter: all'avvio si controlla sempre; se l'app torna visibile, solo dopo 24 ore. */
+    public static void checkWhenVisible(Activity activity) {
+        if (activity == null) return;
+        long last = prefs(activity).getLong(KEY_LAST_AT, 0L);
+        long now = System.currentTimeMillis();
+        if (last <= 0L || now < last || now - last < VISIBLE_CHECK_INTERVAL_MS) return;
+        check(activity, true, null);
     }
 
     public static void check(Activity activity, boolean silent, TextView note) {
@@ -181,8 +193,9 @@ public final class AppUpdates {
                     prefs(activity).edit().putString(KEY_SKIP, remote.version).apply();
                     remember(activity, note, "Aggiornamento " + remote.version + " rimandato");
                 })
-                .setCancelable(true)
+                .setCancelable(false)
                 .create();
+        dialog.setCanceledOnTouchOutside(false);
         dialog.setOnDismissListener(d -> promptOpen = false);
         dialog.show();
     }
@@ -203,16 +216,24 @@ public final class AppUpdates {
     }
 
     private static byte[] downloadApk(Context context, RemoteUpdate remote) throws Exception {
+        LinkedHashSet<String> folders = new LinkedHashSet<>();
         String versionUrl = versionUrl(context);
-        if (MegaPublic.isPublicFolderUrl(versionUrl)) {
-            return MegaPublic.downloadFolderFile(versionUrl, remote.apkName);
+        if (MegaPublic.isPublicFolderUrl(versionUrl)) folders.add(versionUrl);
+        String bundled = context.getString(R.string.mega_version_url).trim();
+        if (MegaPublic.isPublicFolderUrl(bundled)) folders.add(bundled);
+        Exception last = null;
+        for (String folder : folders) {
+            try {
+                return MegaPublic.downloadFolderFile(folder, remote.apkName);
+            } catch (Exception e) {
+                last = e;
+            }
         }
         String apkUrl = savedApkUrl(context);
         if (!MegaPublic.isMegaFileUrl(apkUrl)) apkUrl = remote.apkMegaUrl;
-        if (!MegaPublic.isMegaFileUrl(apkUrl)) {
-            throw new IllegalStateException("Manca il link pubblico dell'APK.");
-        }
-        return MegaPublic.downloadBytes(apkUrl);
+        if (MegaPublic.isMegaFileUrl(apkUrl)) return MegaPublic.downloadBytes(apkUrl);
+        if (last != null) throw last;
+        throw new IllegalStateException("Manca il link pubblico dell'APK.");
     }
 
     private static boolean isNewer(RemoteUpdate remote, Context context) {
@@ -270,7 +291,10 @@ public final class AppUpdates {
     private static void remember(Context context, TextView note, String text) {
         String stamp = new SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.ITALY).format(new Date());
         String line = stamp + " · " + text;
-        prefs(context).edit().putString(KEY_LAST, line).apply();
+        prefs(context).edit()
+                .putString(KEY_LAST, line)
+                .putLong(KEY_LAST_AT, System.currentTimeMillis())
+                .apply();
         if (note != null) note.setText(line);
     }
 

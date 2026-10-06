@@ -8,6 +8,8 @@ import java.util.List;
  * Cerca le stelle come massimi locali sopra un fondo lento.
  * Il fondo è la media in una finestra larga (immagine integrale), così il
  * gradiente del cielo non viene scambiato per una stella.
+ * Sulle nebulose preferisce i picchi compatti: i nodi di gas, più larghi,
+ * perdono di nitidezza e restano fuori dai primi candidati.
  */
 public final class StarFinder {
     public static final class Star {
@@ -19,6 +21,16 @@ public final class StarFinder {
             this.x = x;
             this.y = y;
             this.flux = flux;
+        }
+    }
+
+    private static final class Candidate {
+        final Star star;
+        final float score;
+
+        Candidate(Star star, float score) {
+            this.star = star;
+            this.score = score;
         }
     }
 
@@ -48,24 +60,29 @@ public final class StarFinder {
         }
         float med = Stats.median(bag, samples);
         float sigma = 1.4826f * Stats.mad(bag, samples, med);
-        float threshold = med + Math.max(0.045f, 4f * sigma);
+        float threshold = med + Math.max(0.03f, 3.5f * sigma);
 
         int gap = Math.max(6, Math.min(w, h) / 90);
-        List<Star> found = new ArrayList<>();
-        for (int y = 2; y < h - 2; y++) {
-            for (int x = 2; x < w - 2; x++) {
+        List<Candidate> found = new ArrayList<>();
+        for (int y = 3; y < h - 3; y++) {
+            for (int x = 3; x < w - 3; x++) {
                 int i = y * w + x;
                 float v = residual[i];
                 if (v < threshold) continue;
                 if (!isPeak(residual, w, x, y, v)) continue;
+                float sharp = sharpness(residual, w, x, y, v);
+                // Nodi di nebulosa: picco largo, nitidezza bassa.
+                if (sharp < 2.2f) continue;
                 float[] com = centerOfMass(residual, w, h, x, y);
-                found.add(new Star(com[0], com[1], v));
+                float score = v * sharp;
+                found.add(new Candidate(new Star(com[0], com[1], v), score));
             }
         }
-        found.sort(Comparator.comparingDouble((Star s) -> s.flux).reversed());
+        found.sort(Comparator.comparingDouble((Candidate c) -> c.score).reversed());
         List<Star> kept = new ArrayList<>();
         int gap2 = gap * gap;
-        for (Star star : found) {
+        for (Candidate candidate : found) {
+            Star star = candidate.star;
             boolean close = false;
             for (Star other : kept) {
                 float dx = star.x - other.x;
@@ -91,6 +108,24 @@ public final class StarFinder {
             }
         }
         return true;
+    }
+
+    /** Rapporto picco / anello intorno: alto = stella tipica, basso = macchia estesa. */
+    private static float sharpness(float[] residual, int w, int x, int y, float peak) {
+        float ring = 0f;
+        int count = 0;
+        for (int dy = -3; dy <= 3; dy++) {
+            for (int dx = -3; dx <= 3; dx++) {
+                int d2 = dx * dx + dy * dy;
+                if (d2 < 4 || d2 > 13) continue;
+                ring += Math.max(0f, residual[(y + dy) * w + (x + dx)]);
+                count++;
+            }
+        }
+        if (count == 0) return 0f;
+        float meanRing = ring / count;
+        if (meanRing < 1e-6f) return peak > 0f ? 20f : 0f;
+        return peak / meanRing;
     }
 
     private static float[] centerOfMass(float[] residual, int w, int h, int x, int y) {

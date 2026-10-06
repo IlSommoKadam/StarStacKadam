@@ -21,12 +21,9 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -62,8 +59,11 @@ public final class StackWorkActivity extends Activity {
     private TextView progressText;
     private TextView noteText;
     private ProgressBar progressBar;
-    private CheckBox backgroundToggle;
-    private RadioGroup stretchGroup;
+    private Button autoBtn;
+    private Button levelsBtn;
+    private Button backgroundBtn;
+    private boolean levelsMode;
+    private boolean subtractBackground;
     private LinearLayout levelsBox;
     private SeekBar blackSeek;
     private SeekBar whiteSeek;
@@ -110,7 +110,8 @@ public final class StackWorkActivity extends Activity {
         String modeName = textExtra(intent, MainActivity.EXTRA_MODE);
         mode = "SHARE".equals(modeName) ? StackSession.Mode.SHARE : StackSession.Mode.LIVE;
         profile = mode == StackSession.Mode.SHARE ? store.getShareOptions() : store.getLiveOptions();
-        backgroundToggle.setChecked(profile.subtractBackground);
+        subtractBackground = profile.subtractBackground;
+        stylePill(backgroundBtn, subtractBackground);
         applyModeChrome();
         if (StackService.ACTION_RESUME.equals(intent.getAction())) {
             session = StackService.session();
@@ -205,37 +206,40 @@ public final class StackWorkActivity extends Activity {
         root.addView(progressBar, barLp);
 
         progressText = text("Avvio…", 14, true);
+        progressText.setShadowLayer(dp(3), 0, dp(1), 0xE0000000);
         progressText.setPadding(0, dp(6), 0, 0);
         root.addView(progressText);
 
         noteText = text("", 12, false);
-        noteText.setTextColor(MUTED);
+        noteText.setTextColor(TEXT);
+        noteText.setShadowLayer(dp(3), 0, dp(1), 0xE0000000);
         noteText.setPadding(0, dp(2), 0, dp(8));
         root.addView(noteText);
 
-        stretchGroup = new RadioGroup(this);
-        stretchGroup.setOrientation(RadioGroup.HORIZONTAL);
-        RadioButton auto = radio("Autostretch");
-        auto.setId(View.generateViewId());
-        RadioButton levels = radio("Livelli");
-        levels.setId(View.generateViewId());
-        stretchGroup.addView(auto);
-        stretchGroup.addView(levels);
-        auto.setChecked(true);
-        stretchGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            boolean useLevels = checkedId == levels.getId();
-            levelsBox.setVisibility(useLevels ? View.VISIBLE : View.GONE);
-            applyDisplaySettings();
-            refreshPreview();
-        });
-        root.addView(stretchGroup);
+        LinearLayout stretchRow = new LinearLayout(this);
+        stretchRow.setOrientation(LinearLayout.HORIZONTAL);
+        autoBtn = pill("Autostretch", true);
+        levelsBtn = pill("Livelli", false);
+        autoBtn.setOnClickListener(v -> setStretch(false));
+        levelsBtn.setOnClickListener(v -> setStretch(true));
+        stretchRow.addView(autoBtn, weightLp());
+        stretchRow.addView(space(dp(8)));
+        stretchRow.addView(levelsBtn, weightLp());
+        LinearLayout.LayoutParams stretchLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        stretchLp.topMargin = dp(4);
+        root.addView(stretchRow, stretchLp);
 
         levelsBox = new LinearLayout(this);
         levelsBox.setOrientation(LinearLayout.VERTICAL);
         levelsBox.setVisibility(View.GONE);
-        levelsBox.setPadding(0, dp(4), 0, dp(4));
-        levelsLabel = text("Nero / Bianco / Gamma", 11, false);
-        levelsLabel.setTextColor(MUTED);
+        levelsBox.setBackground(rounded(CARD, dp(8)));
+        levelsBox.setPadding(dp(8), dp(6), dp(8), dp(6));
+        LinearLayout.LayoutParams levelsLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        levelsLp.topMargin = dp(6);
+        levelsLabel = text("Nero / Bianco / Gamma", 12, false);
+        levelsLabel.setTextColor(TEXT);
         levelsBox.addView(levelsLabel);
         blackSeek = seek(0);
         whiteSeek = seek(100);
@@ -257,18 +261,20 @@ public final class StackWorkActivity extends Activity {
         whiteSeek.setOnSeekBarChangeListener(seekListener);
         gammaSeek.setOnSeekBarChangeListener(seekListener);
         updateLevelsLabel();
-        root.addView(levelsBox);
+        root.addView(levelsBox, levelsLp);
 
-        backgroundToggle = new CheckBox(this);
-        backgroundToggle.setText("Sottrai fondo");
-        backgroundToggle.setTextColor(TEXT);
-        backgroundToggle.setChecked(false);
-        backgroundToggle.setOnCheckedChangeListener((buttonView, isChecked) -> {
+        backgroundBtn = pill("Sottrai fondo", false);
+        backgroundBtn.setOnClickListener(v -> {
+            subtractBackground = !subtractBackground;
+            stylePill(backgroundBtn, subtractBackground);
             StackSession live = liveSession();
-            if (live != null) live.setBackgroundFit(isChecked);
+            if (live != null) live.setBackgroundFit(subtractBackground);
             refreshPreview();
         });
-        root.addView(backgroundToggle);
+        LinearLayout.LayoutParams bgLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bgLp.topMargin = dp(6);
+        root.addView(backgroundBtn, bgLp);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -300,8 +306,8 @@ public final class StackWorkActivity extends Activity {
         if (intent.getLongExtra(StackService.EXTRA_JOB, 0L) == 0L) {
             intent.putExtra(StackService.EXTRA_JOB, System.currentTimeMillis());
         }
-        intent.putExtra(StackService.EXTRA_BACKGROUND, backgroundToggle.isChecked());
-        intent.putExtra(StackService.EXTRA_LEVELS, isLevelsMode());
+        intent.putExtra(StackService.EXTRA_BACKGROUND, subtractBackground);
+        intent.putExtra(StackService.EXTRA_LEVELS, levelsMode);
         intent.putExtra(StackService.EXTRA_BLACK, levelBlack());
         intent.putExtra(StackService.EXTRA_WHITE, levelWhite());
         intent.putExtra(StackService.EXTRA_GAMMA, levelGamma());
@@ -387,16 +393,17 @@ public final class StackWorkActivity extends Activity {
     private void applyDisplaySettings() {
         StackSession live = liveSession();
         if (live == null) return;
-        live.setDisplayMode(isLevelsMode(), levelBlack(), levelWhite(), levelGamma());
-        live.setBackgroundFit(backgroundToggle != null && backgroundToggle.isChecked());
+        live.setDisplayMode(levelsMode, levelBlack(), levelWhite(), levelGamma());
+        live.setBackgroundFit(subtractBackground);
     }
 
-    private boolean isLevelsMode() {
-        if (stretchGroup == null) return false;
-        int id = stretchGroup.getCheckedRadioButtonId();
-        View checked = stretchGroup.findViewById(id);
-        return checked instanceof RadioButton
-                && "Livelli".contentEquals(((RadioButton) checked).getText());
+    private void setStretch(boolean levels) {
+        levelsMode = levels;
+        stylePill(autoBtn, !levels);
+        stylePill(levelsBtn, levels);
+        levelsBox.setVisibility(levels ? View.VISIBLE : View.GONE);
+        applyDisplaySettings();
+        refreshPreview();
     }
 
     private float levelBlack() {
@@ -507,16 +514,23 @@ public final class StackWorkActivity extends Activity {
 
     private void applyModeChrome() {
         boolean share = mode == StackSession.Mode.SHARE;
-        titleView.setText(share ? "Stack condivisibile" : "Visione live");
+        titleView.setText(share ? "Stack condivisibile" : "Anteprima Vespera");
         titleView.setTextColor(share ? SHARE : ACCENT);
         String who = caption();
         HostSettingsStore.StackOptions opt = profile;
-        String tuning = opt == null
-                ? ""
-                : "Lato " + opt.maxEdge + " · " + opt.maxStars + " stelle · voti ≥ " + opt.minVotes
-                + (opt.rejectUnaligned ? " · pose deboli escluse. " : " · pose deboli incluse. ");
-        subView.setText(tuning
-                + (share ? "PNG senza perdita + scheda JSON. " : "Media che cresce a ogni posa. ")
+        String body;
+        if (share) {
+            String tuning = opt == null
+                    ? ""
+                    : "Lato " + opt.maxEdge + " · " + opt.maxStars + " stelle · voti ≥ " + opt.minVotes
+                    + " · pose non allineate escluse. ";
+            body = tuning
+                    + (opt != null && opt.useFits ? "FITS. " : "")
+                    + "PNG senza perdita + scheda JSON. ";
+        } else {
+            body = "Ultimo stack Vespera (*-output.jpg), senza rimediarlo. ";
+        }
+        subView.setText(body
                 + AppVersion.label(this)
                 + (who.isEmpty() ? "" : " — " + who));
         saveBtn.setText(share ? "Salva PNG + scheda" : "Salva PNG");
@@ -552,7 +566,7 @@ public final class StackWorkActivity extends Activity {
         json.put("workingEdge", 2048);
         json.put("container", "png");
         json.put("bitDepth", 8);
-        json.put("source", "jpeg");
+        json.put("source", profile != null && profile.useFits ? "fits" : "jpeg");
         json.put("scientificName", scientificName);
         json.put("publicName", publicName);
         json.put("kind", kindLabel);
@@ -587,11 +601,26 @@ public final class StackWorkActivity extends Activity {
         return tv;
     }
 
-    private RadioButton radio(String label) {
-        RadioButton rb = new RadioButton(this);
-        rb.setText(label);
-        rb.setTextColor(TEXT);
-        return rb;
+    private Button pill(String label, boolean on) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setSingleLine(true);
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(dp(40));
+        b.setMinimumHeight(dp(40));
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(10), dp(6), dp(10), dp(6));
+        stylePill(b, on);
+        return b;
+    }
+
+    private void stylePill(Button b, boolean on) {
+        b.setTextColor(Color.WHITE);
+        b.setBackground(rounded(on ? ACCENT : CARD, dp(8)));
     }
 
     private SeekBar seek(int progress) {
@@ -605,8 +634,8 @@ public final class StackWorkActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        TextView label = text(name, 11, false);
-        label.setTextColor(MUTED);
+        TextView label = text(name, 13, true);
+        label.setTextColor(TEXT);
         label.setMinWidth(dp(56));
         row.addView(label);
         row.addView(seekBar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));

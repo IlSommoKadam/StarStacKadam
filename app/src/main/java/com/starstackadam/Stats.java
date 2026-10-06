@@ -10,12 +10,17 @@ final class Stats {
         int n = 0;
         float[] sample = new float[(values.length + step - 1) / step];
         for (int i = 0; i < values.length; i += step) sample[n++] = values[i];
-        if (n == 0) return 0f;
-        Arrays.sort(sample, 0, n);
+        return percentile(sample, n, q);
+    }
+
+    static float percentile(float[] values, int n, float q) {
+        if (n <= 0) return 0f;
+        float[] copy = Arrays.copyOf(values, n);
+        Arrays.sort(copy, 0, n);
         int index = (int) Math.round((n - 1) * q);
         if (index < 0) index = 0;
         if (index >= n) index = n - 1;
-        return sample[index];
+        return copy[index];
     }
 
     static float median(float[] values, int n) {

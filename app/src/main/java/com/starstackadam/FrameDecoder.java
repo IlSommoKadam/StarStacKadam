@@ -7,7 +7,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Locale;
 
-/** Decode JPEG/PNG/WebP → {@link ImagePlane} float RGB 0–1. FITS non supportato in v0.1. */
+/** Decode JPEG/PNG/WebP e, per lo stack condivisibile, FITS → {@link ImagePlane} float RGB 0–1. */
 public final class FrameDecoder {
     private FrameDecoder() {}
 
@@ -25,7 +25,7 @@ public final class FrameDecoder {
         }
         String name = file.getName();
         if (FtpBrowser.isFitsName(name)) {
-            throw new IOException("FITS non supportato in v0.1: " + name);
+            return FitsDecoder.decode(file, maxEdge);
         }
         BitmapFactory.Options bounds = new BitmapFactory.Options();
         bounds.inJustDecodeBounds = true;
@@ -79,7 +79,7 @@ public final class FrameDecoder {
     public static String unsupportedReason(String name) {
         if (name == null) return "Nome file vuoto";
         if (FtpBrowser.isFitsName(name)) {
-            return "FITS non supportato in v0.1";
+            return "FITS solo nello stack condivisibile, con l'opzione avanzata";
         }
         String lower = name.toLowerCase(Locale.ROOT);
         return "Formato non supportato: " + lower;

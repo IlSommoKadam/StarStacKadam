@@ -37,6 +37,7 @@ public final class HostSettingsStore {
     private static final String KEY_SHARE_VOTES = "share_votes";
     private static final String KEY_SHARE_REJECT = "share_reject";
     private static final String KEY_SHARE_BG = "share_bg";
+    private static final String KEY_SHARE_FITS = "share_fits";
 
     /** Timeout di connessione FTP, in secondi. */
     public static final int[] FTP_TIMEOUTS = {8, 12, 20, 30, 45};
@@ -129,18 +130,19 @@ public final class HostSettingsStore {
         return StackOptions.live(
                 prefs.getInt(KEY_LIVE_EDGE, 1280),
                 prefs.getInt(KEY_LIVE_STARS, 40),
-                prefs.getInt(KEY_LIVE_VOTES, 4),
-                prefs.getBoolean(KEY_LIVE_REJECT, false),
+                prefs.getInt(KEY_LIVE_VOTES, 6),
+                prefs.getBoolean(KEY_LIVE_REJECT, true),
                 prefs.getBoolean(KEY_LIVE_BG, false));
     }
 
     public StackOptions getShareOptions() {
         return StackOptions.share(
                 prefs.getInt(KEY_SHARE_EDGE, 2048),
-                prefs.getInt(KEY_SHARE_STARS, 40),
-                prefs.getInt(KEY_SHARE_VOTES, 4),
+                prefs.getInt(KEY_SHARE_STARS, 60),
+                prefs.getInt(KEY_SHARE_VOTES, 6),
                 prefs.getBoolean(KEY_SHARE_REJECT, true),
-                prefs.getBoolean(KEY_SHARE_BG, false));
+                prefs.getBoolean(KEY_SHARE_BG, false),
+                prefs.getBoolean(KEY_SHARE_FITS, false));
     }
 
     /**
@@ -176,6 +178,7 @@ public final class HostSettingsStore {
                 .putInt(KEY_SHARE_VOTES, shareSafe.minVotes)
                 .putBoolean(KEY_SHARE_REJECT, shareSafe.rejectUnaligned)
                 .putBoolean(KEY_SHARE_BG, shareSafe.subtractBackground)
+                .putBoolean(KEY_SHARE_FITS, shareSafe.useFits)
                 .apply();
     }
 
@@ -232,7 +235,7 @@ public final class HostSettingsStore {
 
     /**
      * Parametri di uno dei due stack.
-     * Live (prestazioni) di default non scarta le pose deboli e sta su un lato più corto.
+     * Live (prestazioni): lato più corto. Le pose non allineate restano fuori.
      * Condivisibile (qualità) di default esclude le pose sotto soglia e sale di risoluzione.
      */
     public static final class StackOptions {
@@ -246,18 +249,22 @@ public final class HostSettingsStore {
         public final int minVotes;
         public final boolean rejectUnaligned;
         public final boolean subtractBackground;
+        /** Solo lo stack condivisibile. Il live resta sui JPEG. */
+        public final boolean useFits;
 
         private StackOptions(
                 int maxEdge,
                 int maxStars,
                 int minVotes,
                 boolean rejectUnaligned,
-                boolean subtractBackground) {
+                boolean subtractBackground,
+                boolean useFits) {
             this.maxEdge = maxEdge;
             this.maxStars = maxStars;
             this.minVotes = minVotes;
             this.rejectUnaligned = rejectUnaligned;
             this.subtractBackground = subtractBackground;
+            this.useFits = useFits;
         }
 
         public static StackOptions live(
@@ -267,37 +274,44 @@ public final class HostSettingsStore {
                     nearest(stars, STARS),
                     nearest(votes, VOTES),
                     reject,
-                    background);
+                    background,
+                    false);
         }
 
         public static StackOptions share(
                 int edge, int stars, int votes, boolean reject, boolean background) {
+            return share(edge, stars, votes, reject, background, false);
+        }
+
+        public static StackOptions share(
+                int edge, int stars, int votes, boolean reject, boolean background, boolean fits) {
             return new StackOptions(
                     nearest(edge, SHARE_EDGES),
                     nearest(stars, STARS),
                     nearest(votes, VOTES),
                     reject,
-                    background);
+                    background,
+                    fits);
         }
 
         public static StackOptions livePerformance() {
-            return live(960, 24, 3, false, false);
+            return live(960, 24, 3, true, false);
         }
 
         public static StackOptions liveBalanced() {
-            return live(1280, 40, 4, false, false);
+            return live(1280, 40, 6, true, false);
         }
 
         public static StackOptions liveSharp() {
-            return live(1600, 40, 4, false, false);
+            return live(1600, 60, 6, true, false);
         }
 
         public static StackOptions shareFast() {
-            return share(1600, 40, 4, true, false);
+            return share(1600, 40, 6, true, false);
         }
 
         public static StackOptions shareQuality() {
-            return share(2048, 40, 4, true, false);
+            return share(2048, 60, 6, true, false);
         }
 
         public static StackOptions shareMax() {
@@ -316,7 +330,8 @@ public final class HostSettingsStore {
         public String summary() {
             return maxEdge + " px · " + maxStars + " stelle · voti ≥ " + minVotes
                     + (rejectUnaligned ? " · esclude le pose deboli" : " · tiene le pose deboli")
-                    + (subtractBackground ? " · fondo sottratto" : "");
+                    + (subtractBackground ? " · fondo sottratto" : "")
+                    + (useFits ? " · FITS" : "");
         }
 
         public static int nearest(int value, int[] allowed) {

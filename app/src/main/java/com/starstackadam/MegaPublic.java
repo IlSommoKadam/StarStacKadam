@@ -12,7 +12,9 @@ import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -54,25 +56,14 @@ public final class MegaPublic {
         for (int i = 0; i < nodes.length(); i++) {
             JSONObject node = nodes.optJSONObject(i);
             if (node == null || node.optInt("t") != 0) continue;
-            String encryptedKey = node.optString("k");
-            int colon = encryptedKey.indexOf(':');
-            if (colon >= 0) encryptedKey = encryptedKey.substring(colon + 1);
-            if (encryptedKey.isBlank()) continue;
-            int[] keyWords;
-            try {
-                keyWords = bytesToA32(aesEcbDecrypt(base64UrlBytes(encryptedKey), shareKey));
-            } catch (Exception ignored) {
-                continue;
-            }
-            if (keyWords.length < 8) continue;
+            int[] keyWords = fileNodeKey(node.optString("k"), node.optString("a"), shareKey, wanted);
+            if (keyWords == null) continue;
             int[] aesWords = new int[] {
                     keyWords[0] ^ keyWords[4],
                     keyWords[1] ^ keyWords[5],
                     keyWords[2] ^ keyWords[6],
                     keyWords[3] ^ keyWords[7]
             };
-            String name = fileNameOf(node.optString("a"), a32ToBytes(aesWords));
-            if (!name.equalsIgnoreCase(wanted)) continue;
             int[] iv = new int[] {keyWords[4], keyWords[5], 0, 0};
             JSONObject info = apiNode(folderId, node.optString("h"));
             String downloadUrl = info.optString("g");
@@ -126,6 +117,39 @@ public final class MegaPublic {
     public static JSONObject downloadJson(String url) throws Exception {
         String text = new String(downloadBytes(url), StandardCharsets.UTF_8).replace("\uFEFF", "").trim();
         return new JSONObject(text);
+    }
+
+    /** Una voce Mega può avere più chiavi (`id:chiave/id:chiave`). Vale quella che decifra il nome. */
+    private static int[] fileNodeKey(String nodeKey, String attribute, byte[] shareKey, String wanted) {
+        for (String encryptedKey : keySlots(nodeKey)) {
+            int[] keyWords;
+            try {
+                keyWords = bytesToA32(aesEcbDecrypt(base64UrlBytes(encryptedKey), shareKey));
+            } catch (Exception ignored) {
+                continue;
+            }
+            if (keyWords.length < 8) continue;
+            int[] aesWords = new int[] {
+                    keyWords[0] ^ keyWords[4],
+                    keyWords[1] ^ keyWords[5],
+                    keyWords[2] ^ keyWords[6],
+                    keyWords[3] ^ keyWords[7]
+            };
+            String name = fileNameOf(attribute, a32ToBytes(aesWords));
+            if (name.equalsIgnoreCase(wanted)) return keyWords;
+        }
+        return null;
+    }
+
+    private static List<String> keySlots(String rawKey) {
+        List<String> slots = new ArrayList<>();
+        if (rawKey == null || rawKey.isBlank()) return slots;
+        for (String part : rawKey.split("/")) {
+            int colon = part.indexOf(':');
+            String encrypted = colon >= 0 ? part.substring(colon + 1) : "";
+            if (!encrypted.isBlank()) slots.add(encrypted);
+        }
+        return slots;
     }
 
     private static String fileNameOf(String attr, byte[] key) {
